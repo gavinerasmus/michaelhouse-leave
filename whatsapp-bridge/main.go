@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
+	mathrand "math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/mutecomm/go-sqlcipher/v4"
 	"github.com/mdp/qrterminal"
 
 	"bytes"
@@ -41,6 +44,62 @@ type Message struct {
 	Filename  string
 }
 
+// Key management functions
+func getOrCreateEncryptionKey(envVar, keyFile string) (string, error) {
+	// First try environment variable
+	if key := os.Getenv(envVar); key != "" {
+		return key, nil
+	}
+	
+	// Try to read from key file
+	if data, err := os.ReadFile(keyFile); err == nil {
+		return strings.TrimSpace(string(data)), nil
+	}
+	
+	// Generate new key and save it
+	key, err := generateSecureKey()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate encryption key: %v", err)
+	}
+	
+	// Create directory if it doesn't exist
+	if err := os.MkdirAll(filepath.Dir(keyFile), 0700); err != nil {
+		return "", fmt.Errorf("failed to create key directory: %v", err)
+	}
+	
+	// Save key to file with restricted permissions
+	if err := os.WriteFile(keyFile, []byte(key), 0600); err != nil {
+		return "", fmt.Errorf("failed to save encryption key: %v", err)
+	}
+	
+	fmt.Printf("Generated new encryption key and saved to %s\n", keyFile)
+	fmt.Printf("IMPORTANT: Backup this key file - without it you cannot decrypt your data!\n")
+	
+	return key, nil
+}
+
+func generateSecureKey() (string, error) {
+	key := make([]byte, 32) // 256 bits
+	if _, err := rand.Read(key); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(key), nil
+}
+
+func buildEncryptedDSN(dbPath, key string) string {
+	// URL encode the key for safety
+	encodedKey := url.QueryEscape(key)
+	
+	// Check if key is hex-encoded (64 characters for 32 bytes)
+	if len(key) == 64 {
+		// Use hex format for better performance
+		return fmt.Sprintf("%s?_pragma_key=x'%s'&_pragma_cipher_page_size=4096&_foreign_keys=on", dbPath, key)
+	} else {
+		// Use passphrase format
+		return fmt.Sprintf("%s?_pragma_key=%s&_pragma_cipher_page_size=4096&_foreign_keys=on", dbPath, encodedKey)
+	}
+}
+
 // Database handler for storing message history
 type MessageStore struct {
 	db *sql.DB
@@ -53,8 +112,17 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
-	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	// Get or create encryption key for messages database
+	key, err := getOrCreateEncryptionKey("WHATSAPP_MESSAGES_KEY", "store/.messages_key")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get encryption key: %v", err)
+	}
+
+	// Build encrypted DSN
+	dsn := buildEncryptedDSN("file:store/messages.db", key)
+	
+	// Open encrypted SQLite database for messages
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -787,6 +855,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
+	// Check for migration command
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := MigrateDatabases(); err != nil {
+			fmt.Printf("Migration failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
@@ -800,7 +877,17 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	// Get or create encryption key for WhatsApp session database
+	sessionKey, err := getOrCreateEncryptionKey("WHATSAPP_SESSION_KEY", "store/.session_key")
+	if err != nil {
+		logger.Errorf("Failed to get session encryption key: %v", err)
+		return
+	}
+
+	// Build encrypted DSN for session database
+	sessionDSN := buildEncryptedDSN("file:store/whatsapp.db", sessionKey)
+	
+	container, err := sqlstore.New("sqlite3", sessionDSN, dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
@@ -1306,7 +1393,7 @@ func placeholderWaveform(duration uint32) []byte {
 	waveform := make([]byte, waveformLength)
 
 	// Seed the random number generator for consistent results with the same duration
-	rand.Seed(int64(duration))
+	mathrand.Seed(int64(duration))
 
 	// Create a more natural looking waveform with some patterns and variability
 	// rather than completely random values
@@ -1325,7 +1412,7 @@ func placeholderWaveform(duration uint32) []byte {
 		val += (baseAmplitude / 2) * math.Sin(pos*math.Pi*frequencyFactor*16)
 
 		// Add some randomness to make it look more natural
-		val += (rand.Float64() - 0.5) * 15
+		val += (mathrand.Float64() - 0.5) * 15
 
 		// Add some fade-in and fade-out effects
 		fadeInOut := math.Sin(pos * math.Pi)

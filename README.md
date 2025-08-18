@@ -18,11 +18,12 @@ Here's an example of what you can do when it's connected to Claude.
 
 ### Prerequisites
 
-- Go
+- Go (with CGO enabled for database encryption)
 - Python 3.6+
 - Anthropic Claude Desktop app (or Cursor)
 - UV (Python package manager), install with `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - FFmpeg (_optional_) - Only needed for audio messages. If you want to send audio files as playable WhatsApp voice messages, they must be in `.ogg` Opus format. With FFmpeg installed, the MCP server will automatically convert non-Opus audio files. Without FFmpeg, you can still send raw audio files using the `send_file` tool.
+- GCC compiler (required for SQLite encryption)
 
 ### Steps
 
@@ -33,20 +34,43 @@ Here's an example of what you can do when it's connected to Claude.
    cd whatsapp-mcp
    ```
 
-2. **Run the WhatsApp bridge**
+2. **Set up database encryption (IMPORTANT for security)**
+
+   Your WhatsApp messages and session data are now encrypted at rest using AES-256 encryption. You have two options for encryption keys:
+
+   **Option A: Environment Variables (Recommended)**
+   ```bash
+   export CGO_ENABLED=1
+   export WHATSAPP_MESSAGES_KEY="your-secure-messages-passphrase"
+   export WHATSAPP_SESSION_KEY="your-secure-session-passphrase"
+   ```
+
+   **Option B: Auto-generated Keys (Automatic)**
+   If you don't set environment variables, the application will automatically generate secure 256-bit encryption keys and save them to:
+   - `whatsapp-bridge/store/.messages_key`
+   - `whatsapp-bridge/store/.session_key`
+
+   **⚠️ CRITICAL: Backup your encryption keys! Without them, you cannot decrypt your data.**
+
+3. **Run the WhatsApp bridge**
 
    Navigate to the whatsapp-bridge directory and run the Go application:
 
    ```bash
    cd whatsapp-bridge
-   go run main.go
+   CGO_ENABLED=1 go run main.go
+   ```
+
+   **If you have existing unencrypted databases**, run the migration first:
+   ```bash
+   CGO_ENABLED=1 go run main.go migrate.go migrate
    ```
 
    The first time you run it, you will be prompted to scan a QR code. Scan the QR code with your WhatsApp mobile app to authenticate.
 
    After approximately 20 days, you will might need to re-authenticate.
 
-3. **Connect to the MCP server**
+4. **Connect to the MCP server**
 
    Copy the below json with the appropriate {{PATH}} values:
 
@@ -78,7 +102,7 @@ Here's an example of what you can do when it's connected to Claude.
    ~/.cursor/mcp.json
    ```
 
-4. **Restart Claude Desktop / Cursor**
+5. **Restart Claude Desktop / Cursor**
 
    Open Claude Desktop and you should now see WhatsApp as an available integration.
 
@@ -86,7 +110,7 @@ Here's an example of what you can do when it's connected to Claude.
 
 ### Windows Compatibility
 
-If you're running this project on Windows, be aware that `go-sqlite3` requires **CGO to be enabled** in order to compile and work properly. By default, **CGO is disabled on Windows**, so you need to explicitly enable it and have a C compiler installed.
+If you're running this project on Windows, database encryption requires **CGO to be enabled** and a C compiler installed. By default, **CGO is disabled on Windows**.
 
 #### Steps to get it working:
 
@@ -94,17 +118,24 @@ If you're running this project on Windows, be aware that `go-sqlite3` requires *
    We recommend using [MSYS2](https://www.msys2.org/) to install a C compiler for Windows. After installing MSYS2, make sure to add the `ucrt64\bin` folder to your `PATH`.  
    → A step-by-step guide is available [here](https://code.visualstudio.com/docs/cpp/config-mingw).
 
-2. **Enable CGO and run the app**
+2. **Enable CGO and set encryption keys**
 
    ```bash
    cd whatsapp-bridge
    go env -w CGO_ENABLED=1
+   set WHATSAPP_MESSAGES_KEY=your-secure-messages-passphrase
+   set WHATSAPP_SESSION_KEY=your-secure-session-passphrase
    go run main.go
+   ```
+
+   For migration of existing databases:
+   ```bash
+   go run main.go migrate.go migrate
    ```
 
 Without this setup, you'll likely run into errors like:
 
-> `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work.`
+> `Binary was compiled with 'CGO_ENABLED=0', SQLCipher requires CGO to work.`
 
 ## Architecture Overview
 
@@ -114,11 +145,19 @@ This application consists of two main components:
 
 2. **Python MCP Server** (`whatsapp-mcp-server/`): A Python server implementing the Model Context Protocol (MCP), which provides standardized tools for Claude to interact with WhatsApp data and send/receive messages.
 
-### Data Storage
+### Data Storage & Security
 
-- All message history is stored in a SQLite database within the `whatsapp-bridge/store/` directory
+- All message history is stored in **encrypted SQLite databases** within the `whatsapp-bridge/store/` directory
+- **AES-256 encryption** protects your data at rest using SQLCipher
 - The database maintains tables for chats and messages
 - Messages are indexed for efficient searching and retrieval
+- **Two encrypted databases**:
+  - `messages.db` - Your WhatsApp message content and media metadata
+  - `whatsapp.db` - Session and authentication data
+- **Encryption keys** are stored in:
+  - `store/.messages_key` - Key for messages database
+  - `store/.session_key` - Key for session database
+- **Performance impact**: 5-15% overhead for encryption (minimal impact on normal usage)
 
 ## Usage
 
@@ -179,5 +218,35 @@ By default, just the metadata of the media is stored in the local database. The 
 - **Device Limit Reached**: WhatsApp limits the number of linked devices. If you reach this limit, you'll need to remove an existing device from WhatsApp on your phone (Settings > Linked Devices).
 - **No Messages Loading**: After initial authentication, it can take several minutes for your message history to load, especially if you have many chats.
 - **WhatsApp Out of Sync**: If your WhatsApp messages get out of sync with the bridge, delete both database files (`whatsapp-bridge/store/messages.db` and `whatsapp-bridge/store/whatsapp.db`) and restart the bridge to re-authenticate.
+
+### Database Encryption Issues
+
+- **"Failed to open database" error**: Ensure CGO is enabled (`export CGO_ENABLED=1`) and you have a C compiler installed
+- **"File is encrypted or is not a database" error**: This means you're trying to open an encrypted database without the correct key. Check your encryption key environment variables or key files
+- **Migration issues**: If migration fails, check that the original database exists and is not already encrypted
+- **Lost encryption keys**: Without your encryption keys, your data cannot be recovered. Always backup your key files (`store/.messages_key` and `store/.session_key`)
+- **Key file permissions**: Ensure key files have restricted permissions (`chmod 600 store/.messages_key store/.session_key`)
+
+### Encryption Key Management
+
+To backup your encryption keys:
+```bash
+# Create a secure backup directory
+mkdir -p ~/whatsapp-mcp-backup
+chmod 700 ~/whatsapp-mcp-backup
+
+# Copy key files
+cp whatsapp-bridge/store/.messages_key ~/whatsapp-mcp-backup/
+cp whatsapp-bridge/store/.session_key ~/whatsapp-mcp-backup/
+chmod 600 ~/whatsapp-mcp-backup/*
+```
+
+To restore from backup:
+```bash
+# Copy keys back to store directory
+cp ~/whatsapp-mcp-backup/.messages_key whatsapp-bridge/store/
+cp ~/whatsapp-mcp-backup/.session_key whatsapp-bridge/store/
+chmod 600 whatsapp-bridge/store/.messages_key whatsapp-bridge/store/.session_key
+```
 
 For additional Claude Desktop integration troubleshooting, see the [MCP documentation](https://modelcontextprotocol.io/quickstart/server#claude-for-desktop-integration-issues). The documentation includes helpful tips for checking logs and resolving common issues.
