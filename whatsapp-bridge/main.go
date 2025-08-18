@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -709,7 +710,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
+	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -842,6 +843,76 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
+	// Handler for listing messages
+	http.HandleFunc("/api/messages", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Get query parameters
+		chatJID := r.URL.Query().Get("chat_jid")
+		limit := 20
+		if l := r.URL.Query().Get("limit"); l != "" {
+			if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		// Get messages
+		messages, err := messageStore.GetMessages(chatJID, limit)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get messages: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(messages)
+	})
+
+	// Handler for listing chats
+	http.HandleFunc("/api/chats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Get chats
+		chats, err := messageStore.GetChats()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get chats: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Convert to a more useful format
+		type ChatInfo struct {
+			JID              string    `json:"jid"`
+			Name             string    `json:"name"`
+			LastMessageTime  time.Time `json:"last_message_time"`
+			IsGroup          bool      `json:"is_group"`
+		}
+
+		var chatList []ChatInfo
+		for jid, lastTime := range chats {
+			// Get chat name from database
+			var name string
+			err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", jid).Scan(&name)
+			if err != nil {
+				name = jid // Fallback to JID
+			}
+
+			chatList = append(chatList, ChatInfo{
+				JID:              jid,
+				Name:             name,
+				LastMessageTime:  lastTime,
+				IsGroup:          strings.HasSuffix(jid, "@g.us"),
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chatList)
+	})
+
 	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
@@ -855,15 +926,6 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
-	// Check for migration command
-	if len(os.Args) > 1 && os.Args[1] == "migrate" {
-		if err := MigrateDatabases(); err != nil {
-			fmt.Printf("Migration failed: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
@@ -887,14 +949,14 @@ func main() {
 	// Build encrypted DSN for session database
 	sessionDSN := buildEncryptedDSN("file:store/whatsapp.db", sessionKey)
 	
-	container, err := sqlstore.New("sqlite3", sessionDSN, dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", sessionDSN, dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -1075,7 +1137,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {

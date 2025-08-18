@@ -61,11 +61,6 @@ Here's an example of what you can do when it's connected to Claude.
    CGO_ENABLED=1 go run main.go
    ```
 
-   **If you have existing unencrypted databases**, run the migration first:
-   ```bash
-   CGO_ENABLED=1 go run main.go migrate.go migrate
-   ```
-
    The first time you run it, you will be prompted to scan a QR code. Scan the QR code with your WhatsApp mobile app to authenticate.
 
    After approximately 20 days, you will might need to re-authenticate.
@@ -128,10 +123,6 @@ If you're running this project on Windows, database encryption requires **CGO to
    go run main.go
    ```
 
-   For migration of existing databases:
-   ```bash
-   go run main.go migrate.go migrate
-   ```
 
 Without this setup, you'll likely run into errors like:
 
@@ -223,7 +214,6 @@ By default, just the metadata of the media is stored in the local database. The 
 
 - **"Failed to open database" error**: Ensure CGO is enabled (`export CGO_ENABLED=1`) and you have a C compiler installed
 - **"File is encrypted or is not a database" error**: This means you're trying to open an encrypted database without the correct key. Check your encryption key environment variables or key files
-- **Migration issues**: If migration fails, check that the original database exists and is not already encrypted
 - **Lost encryption keys**: Without your encryption keys, your data cannot be recovered. Always backup your key files (`store/.messages_key` and `store/.session_key`)
 - **Key file permissions**: Ensure key files have restricted permissions (`chmod 600 store/.messages_key store/.session_key`)
 
