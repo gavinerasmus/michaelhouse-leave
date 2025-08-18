@@ -342,3 +342,62 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+def send_reaction(recipient: str, message_id: str, emoji: str) -> Tuple[bool, str]:
+    """Send a reaction to a WhatsApp message."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/react"
+        payload = {
+            "recipient": recipient,
+            "message_id": message_id,
+            "emoji": emoji
+        }
+        
+        response = requests.post(url, json=payload)
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+            
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+def get_reactions_for_message(message_id: str, chat_jid: str) -> List[Dict[str, Any]]:
+    """Get reactions for a specific message."""
+    try:
+        params = {
+            "message_id": message_id,
+            "chat_jid": chat_jid
+        }
+        
+        reactions_data = api_request("reactions", params=params)
+        if not reactions_data:
+            return []
+        
+        return reactions_data
+    except Exception as e:
+        print(f"Error getting reactions for message: {e}")
+        return []
+
+def get_chat_reactions(chat_jid: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Get all reactions in a chat."""
+    try:
+        params = {
+            "chat_jid": chat_jid,
+            "limit": limit
+        }
+        
+        reactions_data = api_request("chat-reactions", params=params)
+        if not reactions_data:
+            return []
+        
+        return reactions_data
+    except Exception as e:
+        print(f"Error getting chat reactions: {e}")
+        return []

@@ -153,10 +153,44 @@ func NewMessageStore() (*MessageStore, error) {
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
+		
+		CREATE TABLE IF NOT EXISTS reactions (
+			id TEXT PRIMARY KEY,
+			message_id TEXT,
+			chat_jid TEXT,
+			reactor TEXT,
+			emoji TEXT,
+			timestamp TIMESTAMP,
+			is_from_me BOOLEAN,
+			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
+		);
 	`)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create tables: %v", err)
+	}
+
+	// Migration: Drop and recreate reactions table if it has foreign key constraints
+	_, err = db.Exec("DROP TABLE IF EXISTS reactions")
+	if err != nil {
+		fmt.Printf("Warning: Failed to drop reactions table during migration: %v\n", err)
+	}
+	
+	// Recreate reactions table without message foreign key constraint
+	_, err = db.Exec(`
+		CREATE TABLE reactions (
+			id TEXT PRIMARY KEY,
+			message_id TEXT,
+			chat_jid TEXT,
+			reactor TEXT,
+			emoji TEXT,
+			timestamp TIMESTAMP,
+			is_from_me BOOLEAN,
+			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
+		)
+	`)
+	if err != nil {
+		fmt.Printf("Warning: Failed to recreate reactions table: %v\n", err)
 	}
 
 	return &MessageStore{db: db}, nil
@@ -241,6 +275,80 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	return chats, nil
 }
 
+// Store a reaction in the database
+func (store *MessageStore) StoreReaction(id, messageID, chatJID, reactor, emoji string, timestamp time.Time, isFromMe bool) error {
+	_, err := store.db.Exec(
+		"INSERT OR REPLACE INTO reactions (id, message_id, chat_jid, reactor, emoji, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		id, messageID, chatJID, reactor, emoji, timestamp, isFromMe,
+	)
+	return err
+}
+
+// Get reactions for a specific message
+func (store *MessageStore) GetReactionsForMessage(messageID, chatJID string) ([]map[string]interface{}, error) {
+	rows, err := store.db.Query(
+		"SELECT id, reactor, emoji, timestamp, is_from_me FROM reactions WHERE message_id = ? AND chat_jid = ? ORDER BY timestamp ASC",
+		messageID, chatJID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reactions []map[string]interface{}
+	for rows.Next() {
+		var id, reactor, emoji string
+		var timestamp time.Time
+		var isFromMe bool
+		err := rows.Scan(&id, &reactor, &emoji, &timestamp, &isFromMe)
+		if err != nil {
+			return nil, err
+		}
+		reactions = append(reactions, map[string]interface{}{
+			"id":         id,
+			"reactor":    reactor,
+			"emoji":      emoji,
+			"timestamp":  timestamp,
+			"is_from_me": isFromMe,
+		})
+	}
+
+	return reactions, nil
+}
+
+// Get all reactions in a chat
+func (store *MessageStore) GetReactionsInChat(chatJID string, limit int) ([]map[string]interface{}, error) {
+	rows, err := store.db.Query(
+		"SELECT id, message_id, reactor, emoji, timestamp, is_from_me FROM reactions WHERE chat_jid = ? ORDER BY timestamp DESC LIMIT ?",
+		chatJID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reactions []map[string]interface{}
+	for rows.Next() {
+		var id, messageID, reactor, emoji string
+		var timestamp time.Time
+		var isFromMe bool
+		err := rows.Scan(&id, &messageID, &reactor, &emoji, &timestamp, &isFromMe)
+		if err != nil {
+			return nil, err
+		}
+		reactions = append(reactions, map[string]interface{}{
+			"id":         id,
+			"message_id": messageID,
+			"reactor":    reactor,
+			"emoji":      emoji,
+			"timestamp":  timestamp,
+			"is_from_me": isFromMe,
+		})
+	}
+
+	return reactions, nil
+}
+
 // Extract text content from a message
 func extractTextContent(msg *waProto.Message) string {
 	if msg == nil {
@@ -258,6 +366,22 @@ func extractTextContent(msg *waProto.Message) string {
 	return ""
 }
 
+// Extract reaction info from a message
+func extractReactionInfo(msg *waProto.Message) (targetMessageID string, emoji string) {
+	if msg == nil {
+		return "", ""
+	}
+
+	// Check for reaction message
+	if reaction := msg.GetReactionMessage(); reaction != nil {
+		targetID := reaction.GetKey().GetID()
+		emoji := reaction.GetText()
+		return targetID, emoji
+	}
+
+	return "", ""
+}
+
 // SendMessageResponse represents the response for the send message API
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
@@ -269,6 +393,19 @@ type SendMessageRequest struct {
 	Recipient string `json:"recipient"`
 	Message   string `json:"message"`
 	MediaPath string `json:"media_path,omitempty"`
+}
+
+// SendReactionRequest represents the request body for the send reaction API
+type SendReactionRequest struct {
+	Recipient   string `json:"recipient"`
+	MessageID   string `json:"message_id"`
+	Emoji       string `json:"emoji"`
+}
+
+// SendReactionResponse represents the response for the send reaction API
+type SendReactionResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
 }
 
 // Function to send a WhatsApp message
@@ -440,6 +577,55 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
+// Function to send a WhatsApp reaction
+func sendWhatsAppReaction(client *whatsmeow.Client, recipient string, messageID string, emoji string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	// Create JID for recipient
+	var recipientJID types.JID
+	var err error
+
+	// Check if recipient is a JID
+	isJID := strings.Contains(recipient, "@")
+
+	if isJID {
+		// Parse the JID string
+		recipientJID, err = types.ParseJID(recipient)
+		if err != nil {
+			return false, fmt.Sprintf("Error parsing JID: %v", err)
+		}
+	} else {
+		// Create JID from phone number
+		recipientJID = types.JID{
+			User:   recipient,
+			Server: "s.whatsapp.net", // For personal chats
+		}
+	}
+
+	// Create reaction message
+	reactionMsg := &waProto.Message{
+		ReactionMessage: &waProto.ReactionMessage{
+			Key: &waProto.MessageKey{
+				RemoteJID: proto.String(recipientJID.String()),
+				ID:        proto.String(messageID),
+				FromMe:    proto.Bool(false), // The message we're reacting to is not from us
+			},
+			Text: proto.String(emoji),
+		},
+	}
+
+	// Send reaction
+	_, err = client.SendMessage(context.Background(), recipientJID, reactionMsg)
+
+	if err != nil {
+		return false, fmt.Sprintf("Error sending reaction: %v", err)
+	}
+
+	return true, fmt.Sprintf("Reaction %s sent to message %s for %s", emoji, messageID, recipient)
+}
+
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
@@ -490,6 +676,35 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
 	if err != nil {
 		logger.Warnf("Failed to store chat: %v", err)
+	}
+
+	// Check if this is a reaction message
+	targetMessageID, emoji := extractReactionInfo(msg.Message)
+	if targetMessageID != "" && emoji != "" {
+		// This is a reaction message
+		reactionID := msg.Info.ID
+		err = messageStore.StoreReaction(
+			reactionID,
+			targetMessageID,
+			chatJID,
+			sender,
+			emoji,
+			msg.Info.Timestamp,
+			msg.Info.IsFromMe,
+		)
+
+		if err != nil {
+			logger.Warnf("Failed to store reaction: %v", err)
+		} else {
+			// Log reaction reception
+			timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
+			direction := "←"
+			if msg.Info.IsFromMe {
+				direction = "→"
+			}
+			fmt.Printf("[%s] %s %s reacted %s to message %s\n", timestamp, direction, sender, emoji, targetMessageID)
+		}
+		return
 	}
 
 	// Extract text content
@@ -911,6 +1126,117 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(chatList)
+	})
+
+	// Handler for sending reactions
+	http.HandleFunc("/api/react", func(w http.ResponseWriter, r *http.Request) {
+		// Only allow POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse the request body
+		var req SendReactionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		// Validate request
+		if req.Recipient == "" {
+			http.Error(w, "Recipient is required", http.StatusBadRequest)
+			return
+		}
+
+		if req.MessageID == "" {
+			http.Error(w, "Message ID is required", http.StatusBadRequest)
+			return
+		}
+
+		if req.Emoji == "" {
+			http.Error(w, "Emoji is required", http.StatusBadRequest)
+			return
+		}
+
+		fmt.Printf("Received request to send reaction %s to message %s for %s\n", req.Emoji, req.MessageID, req.Recipient)
+
+		// Send the reaction
+		success, message := sendWhatsAppReaction(client, req.Recipient, req.MessageID, req.Emoji)
+		fmt.Printf("Reaction sent: %t, message: %s\n", success, message)
+
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+
+		// Set appropriate status code
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		// Send response
+		json.NewEncoder(w).Encode(SendReactionResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
+	// Handler for getting reactions for a message
+	http.HandleFunc("/api/reactions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Get query parameters
+		messageID := r.URL.Query().Get("message_id")
+		chatJID := r.URL.Query().Get("chat_jid")
+
+		if messageID == "" || chatJID == "" {
+			http.Error(w, "message_id and chat_jid are required", http.StatusBadRequest)
+			return
+		}
+
+		// Get reactions
+		reactions, err := messageStore.GetReactionsForMessage(messageID, chatJID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get reactions: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(reactions)
+	})
+
+	// Handler for getting all reactions in a chat
+	http.HandleFunc("/api/chat-reactions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Get query parameters
+		chatJID := r.URL.Query().Get("chat_jid")
+		limit := 50
+		if l := r.URL.Query().Get("limit"); l != "" {
+			if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		if chatJID == "" {
+			http.Error(w, "chat_jid is required", http.StatusBadRequest)
+			return
+		}
+
+		// Get reactions
+		reactions, err := messageStore.GetReactionsInChat(chatJID, limit)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get reactions: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(reactions)
 	})
 
 	// Start the server

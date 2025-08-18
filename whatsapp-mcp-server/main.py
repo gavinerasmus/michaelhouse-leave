@@ -12,7 +12,10 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    send_reaction as whatsapp_send_reaction,
+    get_reactions_for_message as whatsapp_get_reactions_for_message,
+    get_chat_reactions as whatsapp_get_chat_reactions
 )
 
 # Initialize FastMCP server
@@ -245,6 +248,83 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+@mcp.tool()
+def send_reaction(
+    recipient: str,
+    message_id: str,
+    emoji: str
+) -> Dict[str, Any]:
+    """Send a reaction emoji to a WhatsApp message.
+    
+    Args:
+        recipient: The recipient - either a phone number with country code but no + or other symbols,
+                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+        message_id: The ID of the message to react to
+        emoji: The emoji to send as a reaction (e.g., "👍", "❤️", "😂")
+    
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    # Validate input
+    if not recipient:
+        return {
+            "success": False,
+            "message": "Recipient must be provided"
+        }
+    
+    if not message_id:
+        return {
+            "success": False,
+            "message": "Message ID must be provided"
+        }
+    
+    if not emoji:
+        return {
+            "success": False,
+            "message": "Emoji must be provided"
+        }
+    
+    # Call the whatsapp_send_reaction function
+    success, status_message = whatsapp_send_reaction(recipient, message_id, emoji)
+    return {
+        "success": success,
+        "message": status_message
+    }
+
+@mcp.tool()
+def get_message_reactions(
+    message_id: str,
+    chat_jid: str
+) -> List[Dict[str, Any]]:
+    """Get all reactions for a specific WhatsApp message.
+    
+    Args:
+        message_id: The ID of the message to get reactions for
+        chat_jid: The JID of the chat containing the message
+    
+    Returns:
+        A list of reactions with reactor, emoji, timestamp, and other details
+    """
+    reactions = whatsapp_get_reactions_for_message(message_id, chat_jid)
+    return reactions
+
+@mcp.tool()
+def get_chat_reactions(
+    chat_jid: str,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """Get all reactions in a WhatsApp chat.
+    
+    Args:
+        chat_jid: The JID of the chat to get reactions from
+        limit: Maximum number of reactions to return (default 50)
+    
+    Returns:
+        A list of reactions with message_id, reactor, emoji, timestamp, and other details
+    """
+    reactions = whatsapp_get_chat_reactions(chat_jid, limit)
+    return reactions
 
 if __name__ == "__main__":
     # Initialize and run the server
