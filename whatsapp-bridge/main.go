@@ -45,6 +45,43 @@ type Message struct {
 	Filename  string
 }
 
+// AgentConfig represents the configuration for a chat-specific AI agent
+type AgentConfig struct {
+	Enabled          bool    `json:"enabled"`
+	ResponseRate     float64 `json:"response_rate"`     // Probability of responding (0.0 to 1.0)
+	MinTimeBetween   int     `json:"min_time_between"`  // Minimum seconds between responses
+	MaxResponseDelay int     `json:"max_response_delay"` // Maximum delay before responding
+	APIEndpoint      string  `json:"api_endpoint"`      // AI API endpoint
+	APIKey           string  `json:"api_key"`           // API key (if needed)
+	ModelName        string  `json:"model_name"`        // AI model to use
+}
+
+// AgentContext represents the context and memory for an AI agent
+type AgentContext struct {
+	Instructions string                 `json:"instructions"` // Agent personality and instructions
+	Examples     string                 `json:"examples"`     // Example responses
+	Memory       map[string]interface{} `json:"memory"`       // Persistent memory
+	LastResponse time.Time              `json:"last_response"` // Last response time
+}
+
+// ChatMapping represents a chat JID to name mapping
+type ChatMapping struct {
+	JID      string `json:"jid"`
+	Name     string `json:"name"`
+	IsGroup  bool   `json:"is_group"`
+	FolderName string `json:"folder_name"`
+}
+
+// AgentManager manages AI agents for different chats
+type AgentManager struct {
+	configs     map[string]*AgentConfig
+	contexts    map[string]*AgentContext
+	client      *whatsmeow.Client
+	messageStore *MessageStore
+	logger      waLog.Logger
+	chatMappings map[string]*ChatMapping  // JID -> ChatMapping
+}
+
 // Key management functions
 func getOrCreateEncryptionKey(envVar, keyFile string) (string, error) {
 	// First try environment variable
@@ -382,6 +419,297 @@ func extractReactionInfo(msg *waProto.Message) (targetMessageID string, emoji st
 	return "", ""
 }
 
+// NewAgentManager creates a new agent manager
+func NewAgentManager(client *whatsmeow.Client, messageStore *MessageStore, logger waLog.Logger) *AgentManager {
+	am := &AgentManager{
+		configs:      make(map[string]*AgentConfig),
+		contexts:     make(map[string]*AgentContext),
+		client:       client,
+		messageStore: messageStore,
+		logger:       logger,
+		chatMappings: make(map[string]*ChatMapping),
+	}
+	
+	// Load existing chat mappings
+	am.loadChatMappings()
+	
+	return am
+}
+
+// sanitizeFolderName creates a safe folder name from a chat name
+func sanitizeFolderName(chatName string) string {
+	// Replace invalid characters with underscores
+	safe := strings.ReplaceAll(chatName, "/", "_")
+	safe = strings.ReplaceAll(safe, "\\", "_")
+	safe = strings.ReplaceAll(safe, ":", "_")
+	safe = strings.ReplaceAll(safe, "*", "_")
+	safe = strings.ReplaceAll(safe, "?", "_")
+	safe = strings.ReplaceAll(safe, "\"", "_")
+	safe = strings.ReplaceAll(safe, "<", "_")
+	safe = strings.ReplaceAll(safe, ">", "_")
+	safe = strings.ReplaceAll(safe, "|", "_")
+	safe = strings.ReplaceAll(safe, " ", "_")
+	
+	// Remove any trailing dots/spaces
+	safe = strings.TrimRight(safe, ". ")
+	
+	// Limit length
+	if len(safe) > 50 {
+		safe = safe[:50]
+	}
+	
+	return safe
+}
+
+// loadChatMappings loads the chat mappings from file
+func (am *AgentManager) loadChatMappings() {
+	mappingFile := "agents/chat-mappings.json"
+	data, err := os.ReadFile(mappingFile)
+	if err != nil {
+		// File doesn't exist yet, that's okay
+		return
+	}
+	
+	var mappings []ChatMapping
+	if err := json.Unmarshal(data, &mappings); err != nil {
+		am.logger.Warnf("Failed to parse chat mappings: %v", err)
+		return
+	}
+	
+	for _, mapping := range mappings {
+		am.chatMappings[mapping.JID] = &mapping
+	}
+	
+	am.logger.Infof("Loaded %d chat mappings", len(mappings))
+}
+
+// saveChatMappings saves the chat mappings to file
+func (am *AgentManager) saveChatMappings() error {
+	mappingFile := "agents/chat-mappings.json"
+	
+	// Create agents directory if it doesn't exist
+	if err := os.MkdirAll("agents", 0755); err != nil {
+		return fmt.Errorf("failed to create agents directory: %v", err)
+	}
+	
+	var mappings []ChatMapping
+	for _, mapping := range am.chatMappings {
+		mappings = append(mappings, *mapping)
+	}
+	
+	data, err := json.MarshalIndent(mappings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal mappings: %v", err)
+	}
+	
+	if err := os.WriteFile(mappingFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write mappings file: %v", err)
+	}
+	
+	return nil
+}
+
+// updateChatMapping updates or creates a chat mapping
+func (am *AgentManager) updateChatMapping(jid, name string) {
+	isGroup := strings.HasSuffix(jid, "@g.us")
+	folderName := sanitizeFolderName(name)
+	
+	// Ensure unique folder names
+	originalFolder := folderName
+	counter := 1
+	for {
+		exists := false
+		for _, mapping := range am.chatMappings {
+			if mapping.JID != jid && mapping.FolderName == folderName {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			break
+		}
+		folderName = fmt.Sprintf("%s_%d", originalFolder, counter)
+		counter++
+	}
+	
+	mapping := &ChatMapping{
+		JID:        jid,
+		Name:       name,
+		IsGroup:    isGroup,
+		FolderName: folderName,
+	}
+	
+	am.chatMappings[jid] = mapping
+	
+	// Save mappings to file
+	if err := am.saveChatMappings(); err != nil {
+		am.logger.Warnf("Failed to save chat mappings: %v", err)
+	}
+	
+	am.logger.Infof("Updated chat mapping: %s -> %s", name, folderName)
+}
+
+// LoadAgentConfig loads agent configuration for a specific chat
+func (am *AgentManager) LoadAgentConfig(chatJID string) (*AgentConfig, *AgentContext, error) {
+	var configDir string
+	
+	// Check if we have a mapping for this chat
+	if mapping, exists := am.chatMappings[chatJID]; exists {
+		// Use the human-readable folder name
+		configDir = filepath.Join("agents", "chat-configs", mapping.FolderName)
+	} else {
+		// Fallback to old method for backward compatibility
+		safeChatID := strings.ReplaceAll(strings.ReplaceAll(chatJID, "@", "_"), ".", "_")
+		configDir = filepath.Join("agents", "chat-configs", safeChatID)
+	}
+	
+	configPath := filepath.Join(configDir, "config.json")
+	contextPath := filepath.Join(configDir, "context.md")
+	examplesPath := filepath.Join(configDir, "examples.md")
+	
+	// Load config
+	var config AgentConfig
+	if configData, err := os.ReadFile(configPath); err == nil {
+		if err := json.Unmarshal(configData, &config); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse config: %v", err)
+		}
+	} else {
+		// No config found, agent not configured for this chat
+		return nil, nil, nil
+	}
+	
+	// Load context
+	var context AgentContext
+	if contextData, err := os.ReadFile(contextPath); err == nil {
+		context.Instructions = string(contextData)
+	}
+	
+	// Load examples if they exist
+	if examplesData, err := os.ReadFile(examplesPath); err == nil {
+		context.Examples = string(examplesData)
+	}
+	
+	// Initialize memory if not exists
+	if context.Memory == nil {
+		context.Memory = make(map[string]interface{})
+	}
+	
+	// Cache the config and context
+	am.configs[chatJID] = &config
+	am.contexts[chatJID] = &context
+	
+	return &config, &context, nil
+}
+
+// ShouldRespond determines if the agent should respond to a message
+func (am *AgentManager) ShouldRespond(chatJID, messageContent string, isFromMe bool) bool {
+	// Don't respond to our own messages
+	if isFromMe {
+		return false
+	}
+	
+	config, context, err := am.LoadAgentConfig(chatJID)
+	if err != nil {
+		am.logger.Warnf("Failed to load agent config for %s: %v", chatJID, err)
+		return false
+	}
+	
+	// No agent configured for this chat
+	if config == nil {
+		return false
+	}
+	
+	// Agent disabled
+	if !config.Enabled {
+		return false
+	}
+	
+	// Check minimum time between responses
+	if time.Since(context.LastResponse) < time.Duration(config.MinTimeBetween)*time.Second {
+		return false
+	}
+	
+	// Check response rate probability
+	if mathrand.Float64() > config.ResponseRate {
+		return false
+	}
+	
+	return true
+}
+
+// GenerateResponse generates an AI response for a message
+func (am *AgentManager) GenerateResponse(chatJID, messageContent, senderName string) (string, error) {
+	config, context, err := am.LoadAgentConfig(chatJID)
+	if err != nil {
+		return "", err
+	}
+	
+	if config == nil {
+		return "", fmt.Errorf("no agent configured for chat %s", chatJID)
+	}
+	
+	// Get recent message history for context
+	recentMessages, err := am.messageStore.GetMessages(chatJID, 10)
+	if err != nil {
+		am.logger.Warnf("Failed to get recent messages: %v", err)
+	}
+	
+	// Build conversation context
+	conversationHistory := ""
+	for i := len(recentMessages) - 1; i >= 0; i-- {
+		msg := recentMessages[i]
+		sender := "You"
+		if !msg.IsFromMe {
+			sender = msg.Sender
+		}
+		conversationHistory += fmt.Sprintf("%s: %s\n", sender, msg.Content)
+	}
+	
+	// For now, use a simple response generation
+	// TODO: Integrate with actual AI API (OpenAI, Claude, etc.)
+	response := am.generateSimpleResponse(context.Instructions, conversationHistory, messageContent, senderName)
+	
+	// Update last response time
+	context.LastResponse = time.Now()
+	
+	return response, nil
+}
+
+// generateSimpleResponse creates a basic response (placeholder for AI integration)
+func (am *AgentManager) generateSimpleResponse(instructions, history, message, sender string) string {
+	// This is a placeholder - in production this would call an AI API
+	responses := []string{
+		"That's interesting! Tell me more.",
+		"I see what you mean.",
+		"Thanks for sharing that!",
+		"Hmm, let me think about that.",
+		"Good point!",
+	}
+	
+	// Simple response selection based on message length
+	index := len(message) % len(responses)
+	return responses[index]
+}
+
+// SendAgentResponse sends an AI-generated response to a chat
+func (am *AgentManager) SendAgentResponse(chatJID, response string) error {
+	// Add a small delay to make it seem more natural
+	config, _, _ := am.LoadAgentConfig(chatJID)
+	if config != nil && config.MaxResponseDelay > 0 {
+		delay := mathrand.Intn(config.MaxResponseDelay) + 1
+		time.Sleep(time.Duration(delay) * time.Second)
+	}
+	
+	// Send the message
+	success, message := sendWhatsAppMessage(am.client, chatJID, response, "")
+	if !success {
+		return fmt.Errorf("failed to send agent response: %s", message)
+	}
+	
+	am.logger.Infof("Agent sent response to %s: %s", chatJID, response)
+	return nil
+}
+
 // SendMessageResponse represents the response for the send message API
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
@@ -664,7 +992,7 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 }
 
 // Handle regular incoming messages with media support
-func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
+func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, agentManager *AgentManager, logger waLog.Logger) {
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
@@ -676,6 +1004,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
 	if err != nil {
 		logger.Warnf("Failed to store chat: %v", err)
+	}
+	
+	// Update chat mapping for agent management
+	if agentManager != nil {
+		agentManager.updateChatMapping(chatJID, name)
 	}
 
 	// Check if this is a reaction message
@@ -750,6 +1083,24 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
 		} else if content != "" {
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
+		}
+		
+		// Check if agent should respond to this message (only for text messages for now)
+		if agentManager != nil && content != "" {
+			if agentManager.ShouldRespond(chatJID, content, msg.Info.IsFromMe) {
+				go func() {
+					// Generate and send response in a goroutine to avoid blocking
+					response, err := agentManager.GenerateResponse(chatJID, content, sender)
+					if err != nil {
+						logger.Warnf("Failed to generate agent response: %v", err)
+						return
+					}
+					
+					if err := agentManager.SendAgentResponse(chatJID, response); err != nil {
+						logger.Warnf("Failed to send agent response: %v", err)
+					}
+				}()
+			}
 		}
 	}
 }
@@ -1309,12 +1660,15 @@ func main() {
 	}
 	defer messageStore.Close()
 
+	// Initialize AI agent manager
+	agentManager := NewAgentManager(client, messageStore, logger)
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
-			handleMessage(client, messageStore, v, logger)
+			handleMessage(client, messageStore, v, agentManager, logger)
 
 		case *events.HistorySync:
 			// Process history sync events

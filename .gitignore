@@ -2,6 +2,9 @@
 claude_desktop_config.json
 whatsapp.log
 
+# Environment variables - NEVER commit these!
+.env
+
 # Encryption keys - NEVER commit these!
 **/.messages_key
 **/.session_key
