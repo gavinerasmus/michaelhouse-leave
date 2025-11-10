@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	mathrand "math/rand"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 
 	"bytes"
 
+	"github.com/joho/godotenv"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -70,6 +72,38 @@ type ChatMapping struct {
 	Name     string `json:"name"`
 	IsGroup  bool   `json:"is_group"`
 	FolderName string `json:"folder_name"`
+}
+
+// Anthropic API structures
+type AnthropicMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type AnthropicRequest struct {
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	Messages  []AnthropicMessage `json:"messages"`
+	System    string             `json:"system,omitempty"`
+}
+
+type AnthropicContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type AnthropicResponse struct {
+	ID      string                  `json:"id"`
+	Type    string                  `json:"type"`
+	Role    string                  `json:"role"`
+	Content []AnthropicContentBlock `json:"content"`
+	Model   string                  `json:"model"`
+	Error   *AnthropicError         `json:"error,omitempty"`
+}
+
+type AnthropicError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
 }
 
 // AgentManager manages AI agents for different chats
@@ -550,145 +584,370 @@ func (am *AgentManager) updateChatMapping(jid, name string) {
 }
 
 // LoadAgentConfig loads agent configuration for a specific chat
+// It first checks for chat-specific config, then falls back to global config
 func (am *AgentManager) LoadAgentConfig(chatJID string) (*AgentConfig, *AgentContext, error) {
+	fmt.Printf("[DEBUG] LoadAgentConfig called for chat %s\n", chatJID)
+
+	// Try to load chat-specific config first
+	config, context, err := am.loadChatSpecificConfig(chatJID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// If chat-specific config found, use it
+	if config != nil {
+		fmt.Printf("[DEBUG] Using chat-specific config for %s\n", chatJID)
+		return config, context, nil
+	}
+
+	// No chat-specific config, try global config
+	fmt.Printf("[DEBUG] No chat-specific config found, checking global config\n")
+	config, context, err = am.loadGlobalConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if config != nil {
+		fmt.Printf("[DEBUG] Using global config for %s\n", chatJID)
+		// Cache the global config for this chat
+		am.configs[chatJID] = config
+		am.contexts[chatJID] = context
+		return config, context, nil
+	}
+
+	fmt.Printf("[DEBUG] No config found (neither chat-specific nor global) for %s\n", chatJID)
+	return nil, nil, nil
+}
+
+// loadChatSpecificConfig loads configuration for a specific chat
+func (am *AgentManager) loadChatSpecificConfig(chatJID string) (*AgentConfig, *AgentContext, error) {
 	var configDir string
-	
+
 	// Check if we have a mapping for this chat
 	if mapping, exists := am.chatMappings[chatJID]; exists {
 		// Use the human-readable folder name
 		configDir = filepath.Join("agents", "chat-configs", mapping.FolderName)
+		fmt.Printf("[DEBUG] Found mapping for %s -> %s, using config dir: %s\n", chatJID, mapping.FolderName, configDir)
 	} else {
 		// Fallback to old method for backward compatibility
 		safeChatID := strings.ReplaceAll(strings.ReplaceAll(chatJID, "@", "_"), ".", "_")
 		configDir = filepath.Join("agents", "chat-configs", safeChatID)
+		fmt.Printf("[DEBUG] No mapping found for %s, using fallback config dir: %s\n", chatJID, configDir)
 	}
-	
+
 	configPath := filepath.Join(configDir, "config.json")
 	contextPath := filepath.Join(configDir, "context.md")
 	examplesPath := filepath.Join(configDir, "examples.md")
-	
+
+	fmt.Printf("[DEBUG] Looking for chat-specific config at: %s\n", configPath)
+
 	// Load config
 	var config AgentConfig
 	if configData, err := os.ReadFile(configPath); err == nil {
+		fmt.Printf("[DEBUG] Chat-specific config file found, size: %d bytes\n", len(configData))
 		if err := json.Unmarshal(configData, &config); err != nil {
+			fmt.Printf("[DEBUG] Failed to parse JSON config: %v\n", err)
 			return nil, nil, fmt.Errorf("failed to parse config: %v", err)
 		}
+		fmt.Printf("[DEBUG] Config parsed successfully - Enabled: %v, APIKey configured: %v\n", config.Enabled, config.APIKey != "")
+		// Expand environment variables in API key
+		originalAPIKey := config.APIKey
+		config.APIKey = os.ExpandEnv(config.APIKey)
+		fmt.Printf("[DEBUG] APIKey expanded from env: %v\n", originalAPIKey != config.APIKey)
 	} else {
-		// No config found, agent not configured for this chat
+		fmt.Printf("[DEBUG] Chat-specific config file not found: %v\n", err)
+		// No config found, return nil (not an error, just means no chat-specific config)
 		return nil, nil, nil
 	}
-	
+
 	// Load context
 	var context AgentContext
 	if contextData, err := os.ReadFile(contextPath); err == nil {
 		context.Instructions = string(contextData)
 	}
-	
+
 	// Load examples if they exist
 	if examplesData, err := os.ReadFile(examplesPath); err == nil {
 		context.Examples = string(examplesData)
 	}
-	
+
 	// Initialize memory if not exists
 	if context.Memory == nil {
 		context.Memory = make(map[string]interface{})
 	}
-	
+
 	// Cache the config and context
 	am.configs[chatJID] = &config
 	am.contexts[chatJID] = &context
-	
+
+	return &config, &context, nil
+}
+
+// loadGlobalConfig loads the global agent configuration
+func (am *AgentManager) loadGlobalConfig() (*AgentConfig, *AgentContext, error) {
+	configPath := filepath.Join("agents", "global-config.json")
+	contextPath := filepath.Join("agents", "global-context.md")
+	examplesPath := filepath.Join("agents", "global-examples.md")
+
+	fmt.Printf("[DEBUG] Looking for global config at: %s\n", configPath)
+
+	// Load config
+	var config AgentConfig
+	if configData, err := os.ReadFile(configPath); err == nil {
+		fmt.Printf("[DEBUG] Global config file found, size: %d bytes\n", len(configData))
+		if err := json.Unmarshal(configData, &config); err != nil {
+			fmt.Printf("[DEBUG] Failed to parse global config: %v\n", err)
+			return nil, nil, fmt.Errorf("failed to parse global config: %v", err)
+		}
+		fmt.Printf("[DEBUG] Global config parsed - Enabled: %v, APIKey configured: %v\n", config.Enabled, config.APIKey != "")
+		// Expand environment variables in API key
+		originalAPIKey := config.APIKey
+		config.APIKey = os.ExpandEnv(config.APIKey)
+		fmt.Printf("[DEBUG] Global APIKey expanded from env: %v\n", originalAPIKey != config.APIKey)
+	} else {
+		fmt.Printf("[DEBUG] Global config file not found: %v\n", err)
+		// No global config found
+		return nil, nil, nil
+	}
+
+	// Load context
+	var context AgentContext
+	if contextData, err := os.ReadFile(contextPath); err == nil {
+		context.Instructions = string(contextData)
+		fmt.Printf("[DEBUG] Global context loaded, length: %d chars\n", len(context.Instructions))
+	} else {
+		fmt.Printf("[DEBUG] Global context not found: %v\n", err)
+	}
+
+	// Load examples if they exist
+	if examplesData, err := os.ReadFile(examplesPath); err == nil {
+		context.Examples = string(examplesData)
+		fmt.Printf("[DEBUG] Global examples loaded, length: %d chars\n", len(context.Examples))
+	}
+
+	// Initialize memory if not exists
+	if context.Memory == nil {
+		context.Memory = make(map[string]interface{})
+	}
+
 	return &config, &context, nil
 }
 
 // ShouldRespond determines if the agent should respond to a message
 func (am *AgentManager) ShouldRespond(chatJID, messageContent string, isFromMe bool) bool {
+	fmt.Printf("[DEBUG] ShouldRespond called for chat %s, isFromMe: %v\n", chatJID, isFromMe)
+	
 	// Don't respond to our own messages
 	if isFromMe {
+		fmt.Printf("[DEBUG] Skipping own message for chat %s\n", chatJID)
 		return false
 	}
 	
+	fmt.Printf("[DEBUG] Loading agent config for chat %s\n", chatJID)
 	config, context, err := am.LoadAgentConfig(chatJID)
 	if err != nil {
+		fmt.Printf("[DEBUG] Failed to load agent config for %s: %v\n", chatJID, err)
 		am.logger.Warnf("Failed to load agent config for %s: %v", chatJID, err)
 		return false
 	}
 	
 	// No agent configured for this chat
 	if config == nil {
+		fmt.Printf("[DEBUG] No agent configured for chat %s\n", chatJID)
 		return false
 	}
 	
+	fmt.Printf("[DEBUG] Agent config loaded for %s - Enabled: %v, ResponseRate: %f, MinTimeBetween: %d\n", 
+		chatJID, config.Enabled, config.ResponseRate, config.MinTimeBetween)
+	
 	// Agent disabled
 	if !config.Enabled {
+		fmt.Printf("[DEBUG] Agent disabled for chat %s\n", chatJID)
 		return false
 	}
 	
 	// Check minimum time between responses
-	if time.Since(context.LastResponse) < time.Duration(config.MinTimeBetween)*time.Second {
+	timeSinceLastResponse := time.Since(context.LastResponse)
+	minTime := time.Duration(config.MinTimeBetween) * time.Second
+	if timeSinceLastResponse < minTime {
+		fmt.Printf("[DEBUG] Too soon to respond for chat %s - Time since last: %v, Min time: %v\n", 
+			chatJID, timeSinceLastResponse, minTime)
 		return false
 	}
 	
 	// Check response rate probability
-	if mathrand.Float64() > config.ResponseRate {
+	randomValue := mathrand.Float64()
+	if randomValue > config.ResponseRate {
+		fmt.Printf("[DEBUG] Random check failed for chat %s - Random: %f, ResponseRate: %f\n", 
+			chatJID, randomValue, config.ResponseRate)
 		return false
 	}
 	
+	fmt.Printf("[DEBUG] All checks passed for chat %s - Agent should respond\n", chatJID)
 	return true
 }
 
 // GenerateResponse generates an AI response for a message
 func (am *AgentManager) GenerateResponse(chatJID, messageContent, senderName string) (string, error) {
+	fmt.Printf("[DEBUG] GenerateResponse called for chat %s, message: '%s', sender: %s\n", chatJID, messageContent, senderName)
+
 	config, context, err := am.LoadAgentConfig(chatJID)
 	if err != nil {
+		fmt.Printf("[DEBUG] Failed to load config in GenerateResponse for %s: %v\n", chatJID, err)
 		return "", err
 	}
-	
+
 	if config == nil {
+		fmt.Printf("[DEBUG] No config found in GenerateResponse for chat %s\n", chatJID)
 		return "", fmt.Errorf("no agent configured for chat %s", chatJID)
 	}
-	
-	// Get recent message history for context
-	recentMessages, err := am.messageStore.GetMessages(chatJID, 10)
+
+	fmt.Printf("[DEBUG] Config loaded in GenerateResponse - API configured: %v, APIEndpoint: %s\n",
+		config.APIKey != "", config.APIEndpoint)
+
+	// Get recent message history for context (last 15 messages)
+	recentMessages, err := am.messageStore.GetMessages(chatJID, 15)
 	if err != nil {
+		fmt.Printf("[DEBUG] Failed to get recent messages for %s: %v\n", chatJID, err)
 		am.logger.Warnf("Failed to get recent messages: %v", err)
+	} else {
+		fmt.Printf("[DEBUG] Retrieved %d recent messages for chat %s\n", len(recentMessages), chatJID)
 	}
-	
-	// Build conversation context
-	conversationHistory := ""
-	for i := len(recentMessages) - 1; i >= 0; i-- {
-		msg := recentMessages[i]
-		sender := "You"
-		if !msg.IsFromMe {
-			sender = msg.Sender
+
+	// Build conversation history context (excluding the current message)
+	var conversationContext string
+	if len(recentMessages) > 0 {
+		conversationContext = "\n\n## Recent Conversation History (for context only - already responded to)\n\n"
+		for i := len(recentMessages) - 1; i >= 0; i-- {
+			msg := recentMessages[i]
+			if msg.Content == "" {
+				continue
+			}
+
+			sender := "User"
+			if msg.IsFromMe {
+				sender = "You (previous response)"
+			} else if msg.Sender != "" {
+				sender = "User"
+			}
+
+			conversationContext += fmt.Sprintf("%s: %s\n", sender, msg.Content)
 		}
-		conversationHistory += fmt.Sprintf("%s: %s\n", sender, msg.Content)
+		conversationContext += "\n## Current Message (respond to this)\n\n"
 	}
-	
-	// For now, use a simple response generation
-	// TODO: Integrate with actual AI API (OpenAI, Claude, etc.)
-	response := am.generateSimpleResponse(context.Instructions, conversationHistory, messageContent, senderName)
-	
+
+	// Build enhanced system prompt with conversation context
+	enhancedSystemPrompt := context.Instructions
+	if conversationContext != "" {
+		enhancedSystemPrompt = context.Instructions + conversationContext
+	}
+
+	// Build messages array with only the current message
+	messages := []AnthropicMessage{
+		{
+			Role:    "user",
+			Content: messageContent,
+		},
+	}
+
+	fmt.Printf("[DEBUG] Built message with %d chars of conversation context\n", len(conversationContext))
+
+	// Call Anthropic API
+	response, err := am.callAnthropicAPI(config, enhancedSystemPrompt, messages)
+	if err != nil {
+		fmt.Printf("[DEBUG] API call failed for %s: %v\n", chatJID, err)
+		am.logger.Errorf("Failed to call Anthropic API: %v", err)
+		return "", err
+	}
+
+	fmt.Printf("[DEBUG] Generated response for %s: '%s'\n", chatJID, response)
+
 	// Update last response time
 	context.LastResponse = time.Now()
-	
+	fmt.Printf("[DEBUG] Updated last response time for %s\n", chatJID)
+
 	return response, nil
 }
 
-// generateSimpleResponse creates a basic response (placeholder for AI integration)
-func (am *AgentManager) generateSimpleResponse(instructions, history, message, sender string) string {
-	// This is a placeholder - in production this would call an AI API
-	responses := []string{
-		"That's interesting! Tell me more.",
-		"I see what you mean.",
-		"Thanks for sharing that!",
-		"Hmm, let me think about that.",
-		"Good point!",
+// callAnthropicAPI makes a request to the Anthropic Claude API
+func (am *AgentManager) callAnthropicAPI(config *AgentConfig, systemPrompt string, messages []AnthropicMessage) (string, error) {
+	// Validate configuration
+	if config.APIKey == "" {
+		return "", fmt.Errorf("API key is not configured")
 	}
-	
-	// Simple response selection based on message length
-	index := len(message) % len(responses)
-	return responses[index]
+	if config.APIEndpoint == "" {
+		return "", fmt.Errorf("API endpoint is not configured")
+	}
+
+	// Prepare the API request
+	reqBody := AnthropicRequest{
+		Model:     config.ModelName,
+		MaxTokens: 1024,
+		Messages:  messages,
+		System:    systemPrompt,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %v", err)
+	}
+
+	fmt.Printf("[DEBUG] Calling Anthropic API at %s with model %s\n", config.APIEndpoint, config.ModelName)
+	fmt.Printf("[DEBUG] System prompt length: %d chars\n", len(systemPrompt))
+	fmt.Printf("[DEBUG] Messages count: %d\n", len(messages))
+
+	// Create HTTP request
+	req, err := http.NewRequest("POST", config.APIEndpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", config.APIKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	// Make the request
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to make API request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	fmt.Printf("[DEBUG] API response status: %d\n", resp.StatusCode)
+
+	// Check for non-200 status
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var apiResp AnthropicResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %v", err)
+	}
+
+	// Check for API errors
+	if apiResp.Error != nil {
+		return "", fmt.Errorf("API error: %s - %s", apiResp.Error.Type, apiResp.Error.Message)
+	}
+
+	// Extract text from response
+	if len(apiResp.Content) == 0 {
+		return "", fmt.Errorf("no content in API response")
+	}
+
+	responseText := apiResp.Content[0].Text
+	fmt.Printf("[DEBUG] API returned response: '%s'\n", responseText)
+
+	return responseText, nil
 }
 
 // SendAgentResponse sends an AI-generated response to a chat
@@ -1086,20 +1345,37 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 		
 		// Check if agent should respond to this message (only for text messages for now)
+		fmt.Printf("[DEBUG] Checking agent response for chat %s, content: '%s', agentManager: %v\n", chatJID, content, agentManager != nil)
 		if agentManager != nil && content != "" {
+			fmt.Printf("[DEBUG] Calling ShouldRespond for chat %s\n", chatJID)
 			if agentManager.ShouldRespond(chatJID, content, msg.Info.IsFromMe) {
+				fmt.Printf("[DEBUG] Agent should respond to chat %s, generating response...\n", chatJID)
 				go func() {
 					// Generate and send response in a goroutine to avoid blocking
 					response, err := agentManager.GenerateResponse(chatJID, content, sender)
 					if err != nil {
+						fmt.Printf("[DEBUG] Failed to generate agent response for %s: %v\n", chatJID, err)
 						logger.Warnf("Failed to generate agent response: %v", err)
 						return
 					}
 					
+					fmt.Printf("[DEBUG] Sending agent response to %s: %s\n", chatJID, response)
 					if err := agentManager.SendAgentResponse(chatJID, response); err != nil {
+						fmt.Printf("[DEBUG] Failed to send agent response to %s: %v\n", chatJID, err)
 						logger.Warnf("Failed to send agent response: %v", err)
+					} else {
+						fmt.Printf("[DEBUG] Successfully sent agent response to %s\n", chatJID)
 					}
 				}()
+			} else {
+				fmt.Printf("[DEBUG] Agent should NOT respond to chat %s\n", chatJID)
+			}
+		} else {
+			if agentManager == nil {
+				fmt.Printf("[DEBUG] No agentManager available\n")
+			}
+			if content == "" {
+				fmt.Printf("[DEBUG] Empty content, skipping agent check\n")
 			}
 		}
 	}
@@ -1603,6 +1879,11 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
+	// Load environment variables from .env file
+	if err := godotenv.Load("../.env"); err != nil {
+		fmt.Printf("Warning: Could not load .env file: %v\n", err)
+	}
+
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
