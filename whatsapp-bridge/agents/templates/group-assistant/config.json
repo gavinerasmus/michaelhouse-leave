@@ -1,9 +1,0 @@
-{
-  "enabled": true,
-  "response_rate": 0.3,
-  "min_time_between": 30,
-  "max_response_delay": 10,
-  "api_endpoint": "https://api.openai.com/v1/chat/completions",
-  "api_key": "",
-  "model_name": "gpt-3.5-turbo"
-}

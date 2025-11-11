@@ -1,25 +1,12 @@
-# WhatsApp AI Agents System
+# WhatsApp Global AI Agent System
 
-This system allows you to add AI-powered agents to WhatsApp chats that can automatically respond to messages with customizable personalities and behaviors.
+This system allows you to add a global AI-powered agent that can automatically respond to messages across all WhatsApp chats with a customizable personality and behavior.
 
 ## 🚀 Quick Start
 
-### 1. Set up an Agent for a Chat
+### 1. Configure the Global Agent
 
-1. **Start the bridge once**: This will automatically create `agents/chat-mappings.json` with all your active chats
-2. **Check the mapping file**: View `agents/chat-mappings.json` to see chat names and their folder names
-3. **Create agent directory**: For "Notties AI" group, create:
-   ```
-   agents/chat-configs/Notties_AI/
-   ```
-4. **Copy template files**:
-   ```bash
-   cp agents/templates/group-assistant/* agents/chat-configs/Notties_AI/
-   ```
-
-### 2. Configure Your Agent
-
-Edit `agents/chat-configs/Notties_AI/config.json`:
+Edit `agents/global-config.json`:
 
 ```json
 {
@@ -33,9 +20,13 @@ Edit `agents/chat-configs/Notties_AI/config.json`:
 }
 ```
 
-### 3. Customize Agent Personality
+### 2. Customize Agent Personality
 
-Edit `agents/chat-configs/Notties_AI/context.md` to define your agent's personality, knowledge, and behavior.
+Edit `agents/global-context.md` to define your agent's personality, knowledge, and behavior.
+
+### 3. (Optional) Add Examples
+
+Edit `agents/global-examples.md` to provide example responses.
 
 ### 4. Start the Bridge
 
@@ -44,23 +35,18 @@ cd whatsapp-bridge
 ./whatsapp-bridge
 ```
 
-The agent will now monitor messages and respond according to your configuration!
+The global agent will now monitor all messages and respond according to your configuration!
 
 ## 📁 Directory Structure
 
 ```
 agents/
-├── chat-mappings.json      # JID to folder name mappings (auto-generated)
-├── chat-configs/           # Per-chat configurations
-│   ├── Notties_AI/         # Example: "Notties AI" group  
-│   │   ├── config.json     # Agent settings
-│   │   ├── context.md      # Agent personality & instructions
-│   │   ├── examples.md     # Example responses (optional)
-│   │   └── memory.json     # Persistent memory (auto-created)
-│   └── My_Friend_John/     # Example: individual chat
-├── templates/              # Template configurations
-│   ├── group-assistant/    # For group chats
-│   └── personal-assistant/ # For individual chats
+├── global-config.json      # Global agent configuration
+├── global-context.md       # Global agent personality & instructions
+├── global-examples.md      # Example responses (optional)
+├── templates/              # Template configurations (for reference)
+│   ├── group-assistant/    # Example for group chat agents
+│   └── personal-assistant/ # Example for personal chat agents
 └── shared/                 # Shared resources
     ├── common-instructions.md
     └── response-formats.md
@@ -68,23 +54,25 @@ agents/
 
 ## ⚙️ Configuration Options
 
-### config.json Settings
+### global-config.json Settings
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| `enabled` | Whether the agent is active | `true` |
-| `response_rate` | Probability of responding (0.0-1.0) | `0.3` |
-| `min_time_between` | Minimum seconds between responses | `60` |
+| `enabled` | Whether the global agent is active | `true` |
+| `response_rate` | Probability of responding to any message (0.0-1.0) | `0.3` |
+| `min_time_between` | Minimum seconds between responses (global) | `60` |
 | `max_response_delay` | Maximum delay before responding | `15` |
 | `api_endpoint` | AI API endpoint URL | - |
 | `api_key` | API authentication key | - |
 | `model_name` | AI model to use | - |
 
 ### Response Rate Guidelines
-- **0.1-0.2**: Very selective (only important questions)
-- **0.3-0.4**: Balanced (recommended for groups)
-- **0.5-0.7**: Active participant
-- **0.8-1.0**: Very responsive (best for personal chats)
+- **0.1-0.2**: Very selective (responds rarely across all chats)
+- **0.3-0.4**: Balanced (recommended for general use)
+- **0.5-0.7**: Active participant (responds frequently)
+- **0.8-1.0**: Very responsive (responds to most messages)
+
+**Note**: Response rate and timing apply globally across ALL chats, not per-chat.
 
 ## 🤖 Supported AI Providers
 
@@ -106,16 +94,16 @@ agents/
 
 *Note: Currently using placeholder responses. Full AI integration coming soon!*
 
-## 📝 Writing Agent Context
+## 📝 Writing Global Agent Context
 
-The `context.md` file defines your agent's personality. Include:
+The `global-context.md` file defines your agent's personality. Include:
 
 ### Essential Sections
-- **Personality**: How the agent should behave
+- **Personality**: How the agent should behave across all conversations
 - **Role**: What the agent is designed to do
 - **Communication Style**: Tone, emoji usage, response length
 - **Topics**: What to engage with and avoid
-- **Guidelines**: Specific rules for this chat
+- **Guidelines**: Global rules for all chats
 
 ### Example Context Structure
 ```markdown
@@ -137,55 +125,48 @@ You are a [role] for [chat description].
 - [Response length preference]
 - [Emoji usage guidelines]
 - [Formality level]
+
+## Important
+- You respond to ALL chats, not specific ones
+- Adapt your responses to context while maintaining consistent personality
 ```
-
-## 🎯 Pre-configured Examples
-
-### "Notties AI" Group
-- **Focus**: AI/tech discussions
-- **Style**: Knowledgeable, enthusiastic about AI
-- **Response rate**: 40% (balanced engagement)
-- **Specialties**: ML/AI questions, tech news, coding help
-- **JID**: `120363420411363539@g.us`
-
-Located at: `agents/chat-configs/Notties_AI/`
 
 ## 🔧 Troubleshooting
 
 ### Agent Not Responding
-1. Check `config.json` has `"enabled": true`
-2. Verify the chat JID directory name format
-3. Ensure `response_rate` > 0
-4. Check bridge logs for error messages
+1. Check `agents/global-config.json` has `"enabled": true`
+2. Ensure `response_rate` > 0
+3. Verify `min_time_between` hasn't been violated (applies globally)
+4. Check bridge logs for `[DEBUG]` messages showing decision flow
+5. Remember: Global agent responds to ALL chats based on probability
 
-### Finding Chat Names and JIDs
-- Check `agents/chat-mappings.json` after running the bridge once
-- Use API endpoint: `GET http://localhost:8080/api/chats`
-- Format: Groups end in `@g.us`, individuals in `@s.whatsapp.net`
-
-### Directory Naming
-Chat names are automatically converted to safe directory names:
-- Replace special characters with underscores
-- Limit length to 50 characters
-- Ensure uniqueness by adding numbers if needed
-- Example: "Notties AI" → `Notties_AI`
+### Testing the Agent
+- Start the bridge and send messages from WhatsApp
+- Check bridge console logs for `[DEBUG]` output
+- Agent decisions are logged showing:
+  - Whether agent is enabled
+  - Response rate probability check
+  - Time since last response
+  - Final decision to respond or not
 
 ## 🔒 Security Notes
 
 - Keep API keys secure and never commit them to git
-- Each agent only sees messages from its configured chat
-- No cross-chat information sharing
-- Agents respect user privacy
+- Use environment variable expansion: `"${ANTHROPIC_API_KEY}"` in config
+- Global agent sees messages from all chats
+- Agent decisions are logged locally for debugging
+- Respects user privacy - only processes messages when bridge is running
 
 ## 🔮 Future Enhancements
 
-- [ ] Full AI API integration (OpenAI, Claude, etc.)
+- [ ] Full AI API integration (OpenAI, Claude, etc.) - Currently uses placeholder responses
+- [ ] Per-chat personality adaptation while maintaining global config
 - [ ] Advanced memory and learning capabilities
 - [ ] Multi-language support
 - [ ] Voice message responses
 - [ ] Image analysis and response
 - [ ] Scheduled messages and reminders
-- [ ] Web dashboard for management
+- [ ] Web dashboard for agent management
 
 ## 📞 Support
 

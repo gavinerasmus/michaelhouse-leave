@@ -52,35 +52,32 @@ Keys are either:
 
 ### Agent Directory Structure
 
+**Note**: The agents directory is located at the repository root level (`../agents/` relative to this bridge), allowing the global agent to work across multiple communication channels.
+
 ```
-agents/
-├── chat-mappings.json           # JID to human-readable folder mappings
-├── chat-configs/
-│   └── {chat_folder_name}/      # One per chat
-│       ├── config.json          # Agent configuration
-│       ├── context.md           # Agent personality/instructions
-│       ├── examples.md          # Optional response examples
-│       └── memory.json          # Persistent agent memory (auto-created)
-├── templates/
-│   ├── group-assistant/         # Template for group chat agents
-│   └── personal-assistant/      # Template for individual chat agents
+../agents/                       # Root-level agents directory
+├── global-config.json           # Global agent configuration
+├── global-context.md            # Global agent personality/instructions
+├── global-examples.md           # Optional response examples
+├── templates/                   # Template configurations (for reference)
+│   ├── group-assistant/
+│   └── personal-assistant/
 └── shared/                      # Shared resources
 ```
 
-### Chat Mapping System
+### Global Agent System
 
-- The bridge automatically creates/updates `agents/chat-mappings.json` when it sees new chats
-- Chat names are sanitized to safe folder names (e.g., "Notties AI" → "Notties_AI")
-- Agents are loaded from `agents/chat-configs/{folder_name}/` directories
-- This allows human-readable directory names instead of JID-based paths
+- Single global agent responds to all chats across all communication channels
+- No per-chat configuration - one personality for all conversations
+- Agents configured at root level to support multi-channel communication (WhatsApp, email, etc.)
 
-### Agent Configuration (config.json)
+### Agent Configuration (global-config.json)
 
 ```json
 {
-  "enabled": true,              // Whether agent responds
-  "response_rate": 0.3,         // Probability of responding (0.0-1.0)
-  "min_time_between": 60,       // Min seconds between responses
+  "enabled": true,              // Whether global agent responds
+  "response_rate": 0.3,         // Probability of responding to any message (0.0-1.0)
+  "min_time_between": 60,       // Min seconds between responses (global across all chats)
   "max_response_delay": 15,     // Max delay before responding
   "api_endpoint": "...",        // AI API endpoint (currently unused)
   "api_key": "${ENV_VAR}",      // API key (supports env var expansion)
@@ -92,13 +89,13 @@ agents/
 
 ### Agent Decision Flow
 
-1. Message arrives → `handleMessage()` (line 1043)
-2. Check `AgentManager.ShouldRespond()` (line 620):
+1. Message arrives → `handleMessage()`
+2. Check `AgentManager.ShouldRespond()`:
    - Skip if message is from us
-   - Skip if agent disabled or not configured
-   - Check minimum time since last response
+   - Skip if global agent disabled or not configured
+   - Check minimum time since last response (global timer)
    - Roll dice against `response_rate`
-3. If yes → `GenerateResponse()` (line 674) → `SendAgentResponse()` (line 743)
+3. If yes → `GenerateResponse()` → `SendAgentResponse()`
 
 ## REST API Endpoints
 
@@ -140,12 +137,13 @@ rm -rf store/*.db store/.*.key
 ### Agent Management
 
 ```bash
-# Create new agent for a chat
-mkdir -p agents/chat-configs/{chat_name}
-cp agents/templates/group-assistant/* agents/chat-configs/{chat_name}/
+# Configure global agent (from repository root)
+nano agents/global-config.json
+nano agents/global-context.md
 
-# View chat mappings
-cat agents/chat-mappings.json
+# Or from whatsapp-bridge directory
+nano ../agents/global-config.json
+nano ../agents/global-context.md
 ```
 
 ## Important Implementation Details
@@ -211,10 +209,11 @@ Voice messages require Ogg Opus format:
 - Verify `CGO_ENABLED=1` was set during compilation
 
 ### Agent Not Responding
-- Check `agents/chat-configs/{folder_name}/config.json` exists
+- Check `../agents/global-config.json` exists (note: agents at root level)
 - Verify `"enabled": true`
 - Look for debug logs: `[DEBUG]` lines show decision flow
-- Ensure `response_rate` > 0 and `min_time_between` has elapsed
+- Ensure `response_rate` > 0 and `min_time_between` has elapsed (applies globally across all chats)
+- Global agent responds to ALL chats, not specific ones
 
 ## Dependencies
 
@@ -249,3 +248,4 @@ Currently no automated tests. Manual testing involves:
 - `../whatsapp-mcp-server/audio.py`: Audio file conversion utilities
 - `../README.md`: Full project documentation
 - `../AI_AGENTS_README.md`: Agent system documentation
+- `../agents/`: Root-level agent configurations (shared across communication channels)

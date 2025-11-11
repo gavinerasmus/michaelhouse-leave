@@ -66,14 +66,6 @@ type AgentContext struct {
 	LastResponse time.Time              `json:"last_response"` // Last response time
 }
 
-// ChatMapping represents a chat JID to name mapping
-type ChatMapping struct {
-	JID      string `json:"jid"`
-	Name     string `json:"name"`
-	IsGroup  bool   `json:"is_group"`
-	FolderName string `json:"folder_name"`
-}
-
 // Anthropic API structures
 type AnthropicMessage struct {
 	Role    string `json:"role"`
@@ -106,14 +98,13 @@ type AnthropicError struct {
 	Message string `json:"message"`
 }
 
-// AgentManager manages AI agents for different chats
+// AgentManager manages the global AI agent
 type AgentManager struct {
-	configs     map[string]*AgentConfig
-	contexts    map[string]*AgentContext
-	client      *whatsmeow.Client
+	config       *AgentConfig
+	context      *AgentContext
+	client       *whatsmeow.Client
 	messageStore *MessageStore
-	logger      waLog.Logger
-	chatMappings map[string]*ChatMapping  // JID -> ChatMapping
+	logger       waLog.Logger
 }
 
 // Key management functions
@@ -456,238 +447,43 @@ func extractReactionInfo(msg *waProto.Message) (targetMessageID string, emoji st
 // NewAgentManager creates a new agent manager
 func NewAgentManager(client *whatsmeow.Client, messageStore *MessageStore, logger waLog.Logger) *AgentManager {
 	am := &AgentManager{
-		configs:      make(map[string]*AgentConfig),
-		contexts:     make(map[string]*AgentContext),
 		client:       client,
 		messageStore: messageStore,
 		logger:       logger,
-		chatMappings: make(map[string]*ChatMapping),
 	}
-	
-	// Load existing chat mappings
-	am.loadChatMappings()
-	
+
+	// Load global config
+	config, context, err := am.loadGlobalConfig()
+	if err != nil {
+		logger.Warnf("Failed to load global agent config: %v", err)
+	} else if config != nil {
+		am.config = config
+		am.context = context
+		logger.Infof("Global agent loaded - Enabled: %v", config.Enabled)
+	}
+
 	return am
 }
 
-// sanitizeFolderName creates a safe folder name from a chat name
-func sanitizeFolderName(chatName string) string {
-	// Replace invalid characters with underscores
-	safe := strings.ReplaceAll(chatName, "/", "_")
-	safe = strings.ReplaceAll(safe, "\\", "_")
-	safe = strings.ReplaceAll(safe, ":", "_")
-	safe = strings.ReplaceAll(safe, "*", "_")
-	safe = strings.ReplaceAll(safe, "?", "_")
-	safe = strings.ReplaceAll(safe, "\"", "_")
-	safe = strings.ReplaceAll(safe, "<", "_")
-	safe = strings.ReplaceAll(safe, ">", "_")
-	safe = strings.ReplaceAll(safe, "|", "_")
-	safe = strings.ReplaceAll(safe, " ", "_")
-	
-	// Remove any trailing dots/spaces
-	safe = strings.TrimRight(safe, ". ")
-	
-	// Limit length
-	if len(safe) > 50 {
-		safe = safe[:50]
-	}
-	
-	return safe
-}
-
-// loadChatMappings loads the chat mappings from file
-func (am *AgentManager) loadChatMappings() {
-	mappingFile := "agents/chat-mappings.json"
-	data, err := os.ReadFile(mappingFile)
-	if err != nil {
-		// File doesn't exist yet, that's okay
-		return
-	}
-	
-	var mappings []ChatMapping
-	if err := json.Unmarshal(data, &mappings); err != nil {
-		am.logger.Warnf("Failed to parse chat mappings: %v", err)
-		return
-	}
-	
-	for _, mapping := range mappings {
-		am.chatMappings[mapping.JID] = &mapping
-	}
-	
-	am.logger.Infof("Loaded %d chat mappings", len(mappings))
-}
-
-// saveChatMappings saves the chat mappings to file
-func (am *AgentManager) saveChatMappings() error {
-	mappingFile := "agents/chat-mappings.json"
-	
-	// Create agents directory if it doesn't exist
-	if err := os.MkdirAll("agents", 0755); err != nil {
-		return fmt.Errorf("failed to create agents directory: %v", err)
-	}
-	
-	var mappings []ChatMapping
-	for _, mapping := range am.chatMappings {
-		mappings = append(mappings, *mapping)
-	}
-	
-	data, err := json.MarshalIndent(mappings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal mappings: %v", err)
-	}
-	
-	if err := os.WriteFile(mappingFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write mappings file: %v", err)
-	}
-	
-	return nil
-}
-
-// updateChatMapping updates or creates a chat mapping
-func (am *AgentManager) updateChatMapping(jid, name string) {
-	isGroup := strings.HasSuffix(jid, "@g.us")
-	folderName := sanitizeFolderName(name)
-	
-	// Ensure unique folder names
-	originalFolder := folderName
-	counter := 1
-	for {
-		exists := false
-		for _, mapping := range am.chatMappings {
-			if mapping.JID != jid && mapping.FolderName == folderName {
-				exists = true
-				break
-			}
+// LoadAgentConfig returns the global agent configuration
+func (am *AgentManager) LoadAgentConfig() (*AgentConfig, *AgentContext, error) {
+	if am.config == nil || am.context == nil {
+		// Try to reload
+		config, context, err := am.loadGlobalConfig()
+		if err != nil {
+			return nil, nil, err
 		}
-		if !exists {
-			break
-		}
-		folderName = fmt.Sprintf("%s_%d", originalFolder, counter)
-		counter++
+		am.config = config
+		am.context = context
 	}
-	
-	mapping := &ChatMapping{
-		JID:        jid,
-		Name:       name,
-		IsGroup:    isGroup,
-		FolderName: folderName,
-	}
-	
-	am.chatMappings[jid] = mapping
-	
-	// Save mappings to file
-	if err := am.saveChatMappings(); err != nil {
-		am.logger.Warnf("Failed to save chat mappings: %v", err)
-	}
-	
-	am.logger.Infof("Updated chat mapping: %s -> %s", name, folderName)
-}
-
-// LoadAgentConfig loads agent configuration for a specific chat
-// It first checks for chat-specific config, then falls back to global config
-func (am *AgentManager) LoadAgentConfig(chatJID string) (*AgentConfig, *AgentContext, error) {
-	fmt.Printf("[DEBUG] LoadAgentConfig called for chat %s\n", chatJID)
-
-	// Try to load chat-specific config first
-	config, context, err := am.loadChatSpecificConfig(chatJID)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// If chat-specific config found, use it
-	if config != nil {
-		fmt.Printf("[DEBUG] Using chat-specific config for %s\n", chatJID)
-		return config, context, nil
-	}
-
-	// No chat-specific config, try global config
-	fmt.Printf("[DEBUG] No chat-specific config found, checking global config\n")
-	config, context, err = am.loadGlobalConfig()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if config != nil {
-		fmt.Printf("[DEBUG] Using global config for %s\n", chatJID)
-		// Cache the global config for this chat
-		am.configs[chatJID] = config
-		am.contexts[chatJID] = context
-		return config, context, nil
-	}
-
-	fmt.Printf("[DEBUG] No config found (neither chat-specific nor global) for %s\n", chatJID)
-	return nil, nil, nil
-}
-
-// loadChatSpecificConfig loads configuration for a specific chat
-func (am *AgentManager) loadChatSpecificConfig(chatJID string) (*AgentConfig, *AgentContext, error) {
-	var configDir string
-
-	// Check if we have a mapping for this chat
-	if mapping, exists := am.chatMappings[chatJID]; exists {
-		// Use the human-readable folder name
-		configDir = filepath.Join("agents", "chat-configs", mapping.FolderName)
-		fmt.Printf("[DEBUG] Found mapping for %s -> %s, using config dir: %s\n", chatJID, mapping.FolderName, configDir)
-	} else {
-		// Fallback to old method for backward compatibility
-		safeChatID := strings.ReplaceAll(strings.ReplaceAll(chatJID, "@", "_"), ".", "_")
-		configDir = filepath.Join("agents", "chat-configs", safeChatID)
-		fmt.Printf("[DEBUG] No mapping found for %s, using fallback config dir: %s\n", chatJID, configDir)
-	}
-
-	configPath := filepath.Join(configDir, "config.json")
-	contextPath := filepath.Join(configDir, "context.md")
-	examplesPath := filepath.Join(configDir, "examples.md")
-
-	fmt.Printf("[DEBUG] Looking for chat-specific config at: %s\n", configPath)
-
-	// Load config
-	var config AgentConfig
-	if configData, err := os.ReadFile(configPath); err == nil {
-		fmt.Printf("[DEBUG] Chat-specific config file found, size: %d bytes\n", len(configData))
-		if err := json.Unmarshal(configData, &config); err != nil {
-			fmt.Printf("[DEBUG] Failed to parse JSON config: %v\n", err)
-			return nil, nil, fmt.Errorf("failed to parse config: %v", err)
-		}
-		fmt.Printf("[DEBUG] Config parsed successfully - Enabled: %v, APIKey configured: %v\n", config.Enabled, config.APIKey != "")
-		// Expand environment variables in API key
-		originalAPIKey := config.APIKey
-		config.APIKey = os.ExpandEnv(config.APIKey)
-		fmt.Printf("[DEBUG] APIKey expanded from env: %v\n", originalAPIKey != config.APIKey)
-	} else {
-		fmt.Printf("[DEBUG] Chat-specific config file not found: %v\n", err)
-		// No config found, return nil (not an error, just means no chat-specific config)
-		return nil, nil, nil
-	}
-
-	// Load context
-	var context AgentContext
-	if contextData, err := os.ReadFile(contextPath); err == nil {
-		context.Instructions = string(contextData)
-	}
-
-	// Load examples if they exist
-	if examplesData, err := os.ReadFile(examplesPath); err == nil {
-		context.Examples = string(examplesData)
-	}
-
-	// Initialize memory if not exists
-	if context.Memory == nil {
-		context.Memory = make(map[string]interface{})
-	}
-
-	// Cache the config and context
-	am.configs[chatJID] = &config
-	am.contexts[chatJID] = &context
-
-	return &config, &context, nil
+	return am.config, am.context, nil
 }
 
 // loadGlobalConfig loads the global agent configuration
 func (am *AgentManager) loadGlobalConfig() (*AgentConfig, *AgentContext, error) {
-	configPath := filepath.Join("agents", "global-config.json")
-	contextPath := filepath.Join("agents", "global-context.md")
-	examplesPath := filepath.Join("agents", "global-examples.md")
+	configPath := filepath.Join("..", "agents", "global-config.json")
+	contextPath := filepath.Join("..", "agents", "global-context.md")
+	examplesPath := filepath.Join("..", "agents", "global-examples.md")
 
 	fmt.Printf("[DEBUG] Looking for global config at: %s\n", configPath)
 
@@ -733,39 +529,38 @@ func (am *AgentManager) loadGlobalConfig() (*AgentConfig, *AgentContext, error) 
 	return &config, &context, nil
 }
 
-// ShouldRespond determines if the agent should respond to a message
+// ShouldRespond determines if the global agent should respond to a message
 func (am *AgentManager) ShouldRespond(chatJID, messageContent string, isFromMe bool) bool {
 	fmt.Printf("[DEBUG] ShouldRespond called for chat %s, isFromMe: %v\n", chatJID, isFromMe)
-	
+
 	// Don't respond to our own messages
 	if isFromMe {
-		fmt.Printf("[DEBUG] Skipping own message for chat %s\n", chatJID)
+		fmt.Printf("[DEBUG] Skipping own message\n")
 		return false
 	}
-	
-	fmt.Printf("[DEBUG] Loading agent config for chat %s\n", chatJID)
-	config, context, err := am.LoadAgentConfig(chatJID)
+
+	config, context, err := am.LoadAgentConfig()
 	if err != nil {
-		fmt.Printf("[DEBUG] Failed to load agent config for %s: %v\n", chatJID, err)
-		am.logger.Warnf("Failed to load agent config for %s: %v", chatJID, err)
+		fmt.Printf("[DEBUG] Failed to load global agent config: %v\n", err)
+		am.logger.Warnf("Failed to load global agent config: %v", err)
 		return false
 	}
-	
-	// No agent configured for this chat
+
+	// No agent configured
 	if config == nil {
-		fmt.Printf("[DEBUG] No agent configured for chat %s\n", chatJID)
+		fmt.Printf("[DEBUG] No global agent configured\n")
 		return false
 	}
-	
-	fmt.Printf("[DEBUG] Agent config loaded for %s - Enabled: %v, ResponseRate: %f, MinTimeBetween: %d\n", 
-		chatJID, config.Enabled, config.ResponseRate, config.MinTimeBetween)
-	
+
+	fmt.Printf("[DEBUG] Global agent config loaded - Enabled: %v, ResponseRate: %f, MinTimeBetween: %d\n",
+		config.Enabled, config.ResponseRate, config.MinTimeBetween)
+
 	// Agent disabled
 	if !config.Enabled {
-		fmt.Printf("[DEBUG] Agent disabled for chat %s\n", chatJID)
+		fmt.Printf("[DEBUG] Global agent disabled\n")
 		return false
 	}
-	
+
 	// Check minimum time between responses
 	timeSinceLastResponse := time.Since(context.LastResponse)
 	minTime := time.Duration(config.MinTimeBetween) * time.Second
@@ -791,15 +586,15 @@ func (am *AgentManager) ShouldRespond(chatJID, messageContent string, isFromMe b
 func (am *AgentManager) GenerateResponse(chatJID, messageContent, senderName string) (string, error) {
 	fmt.Printf("[DEBUG] GenerateResponse called for chat %s, message: '%s', sender: %s\n", chatJID, messageContent, senderName)
 
-	config, context, err := am.LoadAgentConfig(chatJID)
+	config, context, err := am.LoadAgentConfig()
 	if err != nil {
-		fmt.Printf("[DEBUG] Failed to load config in GenerateResponse for %s: %v\n", chatJID, err)
+		fmt.Printf("[DEBUG] Failed to load global agent config in GenerateResponse: %v\n", err)
 		return "", err
 	}
 
 	if config == nil {
-		fmt.Printf("[DEBUG] No config found in GenerateResponse for chat %s\n", chatJID)
-		return "", fmt.Errorf("no agent configured for chat %s", chatJID)
+		fmt.Printf("[DEBUG] No global agent config found in GenerateResponse\n")
+		return "", fmt.Errorf("no global agent configured")
 	}
 
 	fmt.Printf("[DEBUG] Config loaded in GenerateResponse - API configured: %v, APIEndpoint: %s\n",
@@ -953,7 +748,7 @@ func (am *AgentManager) callAnthropicAPI(config *AgentConfig, systemPrompt strin
 // SendAgentResponse sends an AI-generated response to a chat
 func (am *AgentManager) SendAgentResponse(chatJID, response string) error {
 	// Add a small delay to make it seem more natural
-	config, _, _ := am.LoadAgentConfig(chatJID)
+	config, _, _ := am.LoadAgentConfig()
 	if config != nil && config.MaxResponseDelay > 0 {
 		delay := mathrand.Intn(config.MaxResponseDelay) + 1
 		time.Sleep(time.Duration(delay) * time.Second)
@@ -1263,11 +1058,6 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
 	if err != nil {
 		logger.Warnf("Failed to store chat: %v", err)
-	}
-	
-	// Update chat mapping for agent management
-	if agentManager != nil {
-		agentManager.updateChatMapping(chatJID, name)
 	}
 
 	// Check if this is a reaction message
