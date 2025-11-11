@@ -10,3 +10,6 @@ whatsapp.log
 **/.session_key
 **/store/.messages_key
 **/store/.session_key
+
+# Claude Flow metrics and config
+.claude-flow/
