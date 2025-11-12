@@ -1,0 +1,23 @@
+[Unit]
+Description=Michaelhouse Leave Email Monitoring Service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=michaelhouse
+WorkingDirectory=/opt/michaelhouse/leave-system/email-bridge
+Environment="PATH=/opt/michaelhouse/leave-system/venv/bin"
+ExecStart=/opt/michaelhouse/leave-system/venv/bin/python3 email_service.py
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

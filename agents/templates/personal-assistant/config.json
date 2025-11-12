@@ -1,9 +1,0 @@
-{
-  "enabled": true,
-  "response_rate": 0.7,
-  "min_time_between": 10,
-  "max_response_delay": 5,
-  "api_endpoint": "https://api.anthropic.com/v1/messages",
-  "api_key": "",
-  "model_name": "claude-3-haiku-20240307"
-}

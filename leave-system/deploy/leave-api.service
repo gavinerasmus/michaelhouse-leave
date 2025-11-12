@@ -1,0 +1,33 @@
+[Unit]
+Description=Michaelhouse Leave API Server
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=michaelhouse
+Group=michaelhouse
+WorkingDirectory=/opt/michaelhouse/leave-system
+Environment="PATH=/opt/michaelhouse/leave-system/venv/bin"
+Environment="FLASK_APP=api_production.py"
+Environment="FLASK_ENV=production"
+ExecStart=/opt/michaelhouse/leave-system/venv/bin/gunicorn \
+    --workers 4 \
+    --bind 0.0.0.0:8090 \
+    --timeout 120 \
+    --access-logfile /var/log/leave-api-access.log \
+    --error-logfile /var/log/leave-api-error.log \
+    api_production:app
+
+Restart=always
+RestartSec=10
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log
+
+[Install]
+WantedBy=multi-user.target

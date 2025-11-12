@@ -1,5 +1,5 @@
 {
-  "enabled": false,
+  "enabled": true,
   "response_rate": 0.95,
   "min_time_between": 5,
   "max_response_delay": 3,
