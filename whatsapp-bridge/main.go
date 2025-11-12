@@ -105,6 +105,7 @@ type AgentManager struct {
 	client       *whatsmeow.Client
 	messageStore *MessageStore
 	logger       waLog.Logger
+	agentLogger  *AgentLogger
 }
 
 // Key management functions
@@ -446,10 +447,18 @@ func extractReactionInfo(msg *waProto.Message) (targetMessageID string, emoji st
 
 // NewAgentManager creates a new agent manager
 func NewAgentManager(client *whatsmeow.Client, messageStore *MessageStore, logger waLog.Logger) *AgentManager {
+	// Initialize agent logger
+	agentLogger, err := NewAgentLogger("store")
+	if err != nil {
+		logger.Errorf("Failed to create agent logger: %v", err)
+		// Continue without agent logger
+	}
+
 	am := &AgentManager{
 		client:       client,
 		messageStore: messageStore,
 		logger:       logger,
+		agentLogger:  agentLogger,
 	}
 
 	// Load global config
@@ -533,9 +542,18 @@ func (am *AgentManager) loadGlobalConfig() (*AgentConfig, *AgentContext, error) 
 func (am *AgentManager) ShouldRespond(chatJID, messageContent string, isFromMe bool) bool {
 	fmt.Printf("[DEBUG] ShouldRespond called for chat %s, isFromMe: %v\n", chatJID, isFromMe)
 
+	// Log decision process
+	decision := make(map[string]interface{})
+	decision["check_own_message"] = isFromMe
+
 	// Don't respond to our own messages
 	if isFromMe {
 		fmt.Printf("[DEBUG] Skipping own message\n")
+		decision["result"] = "skip"
+		decision["reason"] = "message from self"
+		if am.agentLogger != nil {
+			am.agentLogger.LogDecision(chatJID, "", decision)
+		}
 		return false
 	}
 
@@ -543,42 +561,82 @@ func (am *AgentManager) ShouldRespond(chatJID, messageContent string, isFromMe b
 	if err != nil {
 		fmt.Printf("[DEBUG] Failed to load global agent config: %v\n", err)
 		am.logger.Warnf("Failed to load global agent config: %v", err)
+		decision["result"] = "skip"
+		decision["reason"] = fmt.Sprintf("config load error: %v", err)
+		if am.agentLogger != nil {
+			am.agentLogger.LogDecision(chatJID, "", decision)
+		}
 		return false
 	}
 
 	// No agent configured
 	if config == nil {
 		fmt.Printf("[DEBUG] No global agent configured\n")
+		decision["result"] = "skip"
+		decision["reason"] = "no agent configured"
+		if am.agentLogger != nil {
+			am.agentLogger.LogDecision(chatJID, "", decision)
+		}
 		return false
 	}
 
 	fmt.Printf("[DEBUG] Global agent config loaded - Enabled: %v, ResponseRate: %f, MinTimeBetween: %d\n",
 		config.Enabled, config.ResponseRate, config.MinTimeBetween)
 
+	decision["agent_enabled"] = config.Enabled
+	decision["response_rate"] = config.ResponseRate
+	decision["min_time_between_seconds"] = config.MinTimeBetween
+
 	// Agent disabled
 	if !config.Enabled {
 		fmt.Printf("[DEBUG] Global agent disabled\n")
+		decision["result"] = "skip"
+		decision["reason"] = "agent disabled in config"
+		if am.agentLogger != nil {
+			am.agentLogger.LogDecision(chatJID, "", decision)
+		}
 		return false
 	}
 
 	// Check minimum time between responses
 	timeSinceLastResponse := time.Since(context.LastResponse)
 	minTime := time.Duration(config.MinTimeBetween) * time.Second
+	decision["time_since_last_response_seconds"] = timeSinceLastResponse.Seconds()
+	decision["min_time_required_seconds"] = minTime.Seconds()
+
 	if timeSinceLastResponse < minTime {
-		fmt.Printf("[DEBUG] Too soon to respond for chat %s - Time since last: %v, Min time: %v\n", 
+		fmt.Printf("[DEBUG] Too soon to respond for chat %s - Time since last: %v, Min time: %v\n",
 			chatJID, timeSinceLastResponse, minTime)
+		decision["result"] = "skip"
+		decision["reason"] = "too soon since last response"
+		if am.agentLogger != nil {
+			am.agentLogger.LogDecision(chatJID, "", decision)
+		}
 		return false
 	}
-	
+
 	// Check response rate probability
 	randomValue := mathrand.Float64()
+	decision["random_value"] = randomValue
+	decision["passes_probability"] = randomValue <= config.ResponseRate
+
 	if randomValue > config.ResponseRate {
-		fmt.Printf("[DEBUG] Random check failed for chat %s - Random: %f, ResponseRate: %f\n", 
+		fmt.Printf("[DEBUG] Random check failed for chat %s - Random: %f, ResponseRate: %f\n",
 			chatJID, randomValue, config.ResponseRate)
+		decision["result"] = "skip"
+		decision["reason"] = "did not pass probability check"
+		if am.agentLogger != nil {
+			am.agentLogger.LogDecision(chatJID, "", decision)
+		}
 		return false
 	}
-	
+
 	fmt.Printf("[DEBUG] All checks passed for chat %s - Agent should respond\n", chatJID)
+	decision["result"] = "respond"
+	decision["reason"] = "all checks passed"
+	if am.agentLogger != nil {
+		am.agentLogger.LogDecision(chatJID, "", decision)
+	}
 	return true
 }
 
@@ -586,27 +644,50 @@ func (am *AgentManager) ShouldRespond(chatJID, messageContent string, isFromMe b
 func (am *AgentManager) GenerateResponse(chatJID, messageContent, senderName string) (string, error) {
 	fmt.Printf("[DEBUG] GenerateResponse called for chat %s, message: '%s', sender: %s\n", chatJID, messageContent, senderName)
 
+	// Log analysis start
+	analysis := make(map[string]interface{})
+	analysis["message_length"] = len(messageContent)
+	analysis["sender"] = senderName
+
 	config, context, err := am.LoadAgentConfig()
 	if err != nil {
 		fmt.Printf("[DEBUG] Failed to load global agent config in GenerateResponse: %v\n", err)
+		if am.agentLogger != nil {
+			am.agentLogger.LogError(chatJID, "", "generate_response", fmt.Sprintf("config load error: %v", err))
+		}
 		return "", err
 	}
 
 	if config == nil {
 		fmt.Printf("[DEBUG] No global agent config found in GenerateResponse\n")
+		if am.agentLogger != nil {
+			am.agentLogger.LogError(chatJID, "", "generate_response", "no agent configured")
+		}
 		return "", fmt.Errorf("no global agent configured")
 	}
 
 	fmt.Printf("[DEBUG] Config loaded in GenerateResponse - API configured: %v, APIEndpoint: %s\n",
 		config.APIKey != "", config.APIEndpoint)
 
+	analysis["api_configured"] = config.APIKey != ""
+	analysis["api_endpoint"] = config.APIEndpoint
+
 	// Get recent message history for context (last 15 messages)
 	recentMessages, err := am.messageStore.GetMessages(chatJID, 15)
 	if err != nil {
 		fmt.Printf("[DEBUG] Failed to get recent messages for %s: %v\n", chatJID, err)
 		am.logger.Warnf("Failed to get recent messages: %v", err)
+		analysis["history_retrieved"] = false
+		analysis["history_error"] = err.Error()
 	} else {
 		fmt.Printf("[DEBUG] Retrieved %d recent messages for chat %s\n", len(recentMessages), chatJID)
+		analysis["history_retrieved"] = true
+		analysis["history_message_count"] = len(recentMessages)
+	}
+
+	// Log initial analysis
+	if am.agentLogger != nil {
+		am.agentLogger.LogAnalysis(chatJID, "", analysis)
 	}
 
 	// Build conversation history context (excluding the current message)
@@ -652,10 +733,22 @@ func (am *AgentManager) GenerateResponse(chatJID, messageContent, senderName str
 	if err != nil {
 		fmt.Printf("[DEBUG] API call failed for %s: %v\n", chatJID, err)
 		am.logger.Errorf("Failed to call Anthropic API: %v", err)
+		if am.agentLogger != nil {
+			am.agentLogger.LogError(chatJID, "", "api_call", fmt.Sprintf("API call failed: %v", err))
+		}
 		return "", err
 	}
 
 	fmt.Printf("[DEBUG] Generated response for %s: '%s'\n", chatJID, response)
+
+	// Log the generated response
+	responseLogic := make(map[string]interface{})
+	responseLogic["response_length"] = len(response)
+	responseLogic["context_length"] = len(conversationContext)
+	responseLogic["api_success"] = true
+	if am.agentLogger != nil {
+		am.agentLogger.LogResponse(chatJID, "", "", response, responseLogic)
+	}
 
 	// Update last response time
 	context.LastResponse = time.Now()
@@ -1133,7 +1226,12 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		} else if content != "" {
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
 		}
-		
+
+		// Log message to agent logger
+		if agentManager != nil && agentManager.agentLogger != nil && content != "" {
+			agentManager.agentLogger.LogReceivedMessage(chatJID, name, msg.Info.ID, sender, content)
+		}
+
 		// Check if agent should respond to this message (only for text messages for now)
 		fmt.Printf("[DEBUG] Checking agent response for chat %s, content: '%s', agentManager: %v\n", chatJID, content, agentManager != nil)
 		if agentManager != nil && content != "" {

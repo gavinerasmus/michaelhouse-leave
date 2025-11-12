@@ -11,5 +11,9 @@ whatsapp.log
 **/store/.messages_key
 **/store/.session_key
 
+# Agent logs - contain sensitive conversation data
+**/store/agent-logs/
+!**/store/agent-logs/README.md
+
 # Claude Flow metrics and config
 .claude-flow/

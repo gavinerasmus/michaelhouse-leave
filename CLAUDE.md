@@ -84,14 +84,14 @@ rm -rf whatsapp-bridge/store/whatsapp.db whatsapp-bridge/store/.session_key
 ### AI Agent Management
 
 ```bash
-# Configure global agent
-nano agents/global-config.json
+# Configure agent (now in leave-system)
+nano leave-system/agents/config.json
 
-# Edit global agent personality
-nano agents/global-context.md
+# Edit agent personality
+nano leave-system/agents/context.md
 
-# Optionally add examples
-nano agents/global-examples.md
+# Note: Agent logic now lives in leave-system, not in bridges
+# See CLEAN_ARCHITECTURE.md for details
 ```
 
 ## Database Structure
@@ -117,18 +117,30 @@ chmod 600 ~/backup/.*.key
 
 ## AI Agent System
 
-The bridge supports a global AI agent with a customizable personality. The agent is configured at the root level in the `agents/` directory, allowing it to work across all chats and multiple communication channels (WhatsApp, email, etc.). See `AI_AGENTS_README.md` for full details.
+**IMPORTANT:** The AI agent now lives in the **Leave System**, not in communication bridges. This follows clean architecture principles where channels are just pipes and all logic lives centrally.
+
+The agent is configured in `leave-system/agents/` directory and handles requests for all communication channels (WhatsApp, Email, etc.). See `leave-system/agents/README.md` for full details.
+
+### Architecture
+
+```
+WhatsApp Bridge → Leave System API → AI Agent → Response
+(Just forwards)    (All logic here)
+```
 
 ### Quick Setup
 
-1. Edit `agents/global-config.json` to enable and configure response behavior
-2. Edit `agents/global-context.md` to define agent personality
-3. Optionally add `agents/global-examples.md` for example responses
-4. Restart bridge to load the configuration
+1. Configure: `leave-system/agents/config.json` (optional)
+2. Edit personality: `leave-system/agents/context.md`
+3. Set API key: `export ANTHROPIC_API_KEY="your-key"`
+4. Start Leave System: `cd leave-system && python3 api.py`
+5. Start bridge (optional): Bridge forwards to Leave System
 
-### Global Agent Configuration Options
+See `CLEAN_ARCHITECTURE.md` for complete architecture documentation.
 
-Edit `agents/global-config.json`:
+### Agent Configuration Options
+
+**Note:** Configuration is now in `leave-system/agents/config.json`:
 
 - `enabled`: Whether the global agent responds to messages
 - `response_rate`: Probability of responding to any message (0.0-1.0)
@@ -340,6 +352,6 @@ Currently no automated tests. Manual testing workflow:
 ## Related Documentation
 
 - `README.md`: Full installation and setup guide
-- `AI_AGENTS_README.md`: Comprehensive agent system documentation
+- `agents/GLOBAL_AGENT_README.md`: Comprehensive agent system documentation
 - `whatsapp-bridge/CLAUDE.md`: Detailed bridge-specific guidance
 - `LICENSE`: MIT license terms

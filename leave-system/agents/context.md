@@ -37,9 +37,10 @@ For **EVERY** parent request, follow this sequential assessment:
 
 #### Step 1: Data Capture
 Extract and identify:
-- Student ID
+- Student ID (also know as laundry number or Admin number)
 - Requested exeat date(s)/duration
 - Requesting parent's name
+- If no Student ID is provided request the student ID. DO NOT process without the Student ID.
 
 #### Step 2: Date Check (Sanctioned Dates)
 **Condition**: Check if requested date range overlaps with any Sanctioned Date/Prohibited Period

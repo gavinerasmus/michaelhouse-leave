@@ -247,5 +247,5 @@ Currently no automated tests. Manual testing involves:
 - `../whatsapp-mcp-server/whatsapp.py`: WhatsApp tool implementations for MCP
 - `../whatsapp-mcp-server/audio.py`: Audio file conversion utilities
 - `../README.md`: Full project documentation
-- `../AI_AGENTS_README.md`: Agent system documentation
+- `../agents/GLOBAL_AGENT_README.md`: Agent system documentation
 - `../agents/`: Root-level agent configurations (shared across communication channels)
