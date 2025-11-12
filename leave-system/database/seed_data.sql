@@ -29,23 +29,23 @@ INSERT INTO students (admin_number, first_name, last_name, house, block) VALUES
 
 -- ==================== STUDENT-PARENT LINKAGE ====================
 
-INSERT INTO student_parents (student_id, parent_id, relationship, primary_contact)
-SELECT s.id, p.id, 'Father', true
+INSERT INTO student_parents (student_id, parent_id, primary_contact)
+SELECT s.id, p.id, true
 FROM students s, parents p
 WHERE s.admin_number = '12345' AND p.parent_id = 'PARENT_001';
 
-INSERT INTO student_parents (student_id, parent_id, relationship, primary_contact)
-SELECT s.id, p.id, 'Mother', true
+INSERT INTO student_parents (student_id, parent_id, primary_contact)
+SELECT s.id, p.id, true
 FROM students s, parents p
 WHERE s.admin_number = '67890' AND p.parent_id = 'PARENT_002';
 
-INSERT INTO student_parents (student_id, parent_id, relationship, primary_contact)
-SELECT s.id, p.id, 'Father', true
+INSERT INTO student_parents (student_id, parent_id, primary_contact)
+SELECT s.id, p.id, true
 FROM students s, parents p
 WHERE s.admin_number = '11111' AND p.parent_id = 'PARENT_003';
 
-INSERT INTO student_parents (student_id, parent_id, relationship, primary_contact)
-SELECT s.id, p.id, 'Mother', true
+INSERT INTO student_parents (student_id, parent_id, primary_contact)
+SELECT s.id, p.id, true
 FROM students s, parents p
 WHERE s.admin_number = '22222' AND p.parent_id = 'PARENT_004';
 

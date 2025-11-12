@@ -45,7 +45,6 @@ CREATE TABLE student_parents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     parent_id UUID NOT NULL REFERENCES parents(id) ON DELETE CASCADE,
-    relationship VARCHAR(50),  -- 'Mother', 'Father', 'Guardian'
     primary_contact BOOLEAN DEFAULT false,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(student_id, parent_id)

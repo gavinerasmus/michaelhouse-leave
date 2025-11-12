@@ -12,6 +12,11 @@ from flask import Flask, request, jsonify
 from processors.leave_processor import LeaveProcessor
 from agents.conversation_agent import ConversationAgent
 import logging
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -21,11 +26,45 @@ logging.basicConfig(
 logger = logging.getLogger('leave_api')
 
 app = Flask(__name__)
+
+# Initialize backend (Google Sheets or PostgreSQL)
+use_sheets = os.getenv('USE_GOOGLE_SHEETS', 'false').lower() == 'true'
+use_simple_oauth = os.getenv('USE_SIMPLE_OAUTH', 'false').lower() == 'true'
+
+if use_sheets:
+    try:
+        if use_simple_oauth:
+            # Use simplified OAuth with personal Google account
+            from tools.google_sheets_simple import GoogleSheetsSimple
+            tools = GoogleSheetsSimple()
+            logger.info("✅ Using Google Sheets backend (Simple OAuth)")
+        else:
+            # Use service account (original method)
+            from tools.google_sheets_tools import GoogleSheetsTools
+            tools = GoogleSheetsTools()
+            logger.info("✅ Using Google Sheets backend (Service Account)")
+    except Exception as e:
+        logger.error(f"Failed to initialize Google Sheets backend: {e}")
+        logger.info("Falling back to placeholder tools")
+        from tools.placeholder_tools import PlaceholderTools
+        tools = PlaceholderTools()
+else:
+    try:
+        from tools.database_tools import DatabaseTools
+        tools = DatabaseTools()
+        logger.info("✅ Using PostgreSQL database backend")
+    except Exception as e:
+        logger.error(f"Failed to initialize database backend: {e}")
+        logger.info("Falling back to placeholder tools")
+        from tools.placeholder_tools import PlaceholderTools
+        tools = PlaceholderTools()
+
+# Initialize processor with selected tools
 processor = LeaveProcessor()
+processor.tools = tools
 
 # Initialize conversation agent
 # Agent will auto-load context from agents/context.md
-import os
 conversation_agent = ConversationAgent()
 
 

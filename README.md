@@ -208,25 +208,33 @@ leave/
 ## 🚦 Getting Started
 
 ### Prerequisites
-- PostgreSQL 12+
 - Python 3.8+
-- Go 1.19+ (for WhatsApp)
+- **Either:**
+  - PostgreSQL 12+ (for production), **OR**
+  - Google Sheets (for testing - no database needed!)
+- Go 1.19+ (optional - for WhatsApp)
 - Anthropic API key
 
 ### Installation
 
-**Option 1: Quick Testing (15 minutes)**
+**Option 1: Google Sheets (No Database!) - 5 minutes** ⭐ Easiest
+```bash
+# See leave-system/GOOGLE_SHEETS_SIMPLE_SETUP.md
+cd leave-system
+pip3 install -r requirements.txt
+# Create Google Sheet, enable API, configure .env
+export USE_GOOGLE_SHEETS=true
+export USE_SIMPLE_OAUTH=true
+python3 api.py  # Browser opens for one-time auth
+```
+
+**Option 2: PostgreSQL (Full Database) - 15 minutes**
 ```bash
 # See QUICKSTART.md
 cd leave-system/database && ./setup_database.sh --reset
 cd .. && pip3 install -r requirements.txt
 export ANTHROPIC_API_KEY="your-key"
 python3 api.py
-```
-
-**Option 2: Full Development**
-```bash
-# See QUICKSTART.md for complete instructions
 ```
 
 **Option 3: Production Deployment**
